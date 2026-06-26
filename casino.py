@@ -2697,12 +2697,9 @@ LEVEL_RANK = {"user": 0, "admin": 1, "owner": 2}
 
 
 def user_level(member):
-    if is_owner_id(member.id):
-        return "owner"
-    perms = getattr(member, "guild_permissions", None)
-    if perms is not None and perms.administrator:
-        return "admin"
-    return "user"
+    # Only the bot owner(s) see the full help. Everyone else — including
+    # Discord server admins — only sees the public commands.
+    return "owner" if is_owner_id(member.id) else "user"
 
 
 def _help_cats():
