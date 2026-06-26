@@ -2676,7 +2676,9 @@ def visible_categories(level):
 
 class HelpSelect(discord.ui.Select):
     def __init__(self, parent):
-        options = [
+        options = [discord.SelectOption(label="🏠 Home", value="home",
+                                        description="Back to the categories overview")]
+        options += [
             discord.SelectOption(label=f"{c['emoji']} {c['label']}", value=str(i),
                                  description=f"{len(c['commands'])} command(s)")
             for i, c in enumerate(parent.cats)
@@ -2686,7 +2688,8 @@ class HelpSelect(discord.ui.Select):
 
     async def callback(self, interaction):
         try:
-            self.parent.cat_index = int(self.values[0])
+            v = self.values[0]
+            self.parent.cat_index = None if v == "home" else int(v)
             self.parent.page = 0
             await self.parent.update(interaction)
         except Exception:
@@ -2696,17 +2699,52 @@ class HelpSelect(discord.ui.Select):
                 pass
 
 
+class HelpPrev(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="◀ Prev", style=discord.ButtonStyle.secondary, row=1)
+
+    async def callback(self, interaction):
+        v = self.view
+        if v.cat_index is None or v.page <= 0:
+            await interaction.response.defer()  # already first page → nothing
+            return
+        v.page -= 1
+        await v.update(interaction)
+
+
+class HelpNext(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Next ▶", style=discord.ButtonStyle.secondary, row=1)
+
+    async def callback(self, interaction):
+        v = self.view
+        if v.cat_index is None or v.page >= v._pages() - 1:
+            await interaction.response.defer()  # already last page → nothing
+            return
+        v.page += 1
+        await v.update(interaction)
+
+
 class HelpView(discord.ui.View):
     def __init__(self, author, level):
         super().__init__(timeout=180)
         self.author = author
         self.level = level
         self.cats = visible_categories(level)
-        self.cat_index = 0
+        self.cat_index = None  # None = home screen
         self.page = 0
         self.message = None
         self.select = HelpSelect(self)
+        self.prev = HelpPrev()
+        self.next = HelpNext()
+        self._rebuild()
+
+    def _rebuild(self):
+        self.clear_items()
         self.add_item(self.select)
+        if self.cat_index is not None:  # pagination buttons only inside a category
+            self.add_item(self.prev)
+            self.add_item(self.next)
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.author.id:
@@ -2729,7 +2767,19 @@ class HelpView(discord.ui.View):
     def _pages(self):
         return max(1, math.ceil(len(self._cat()["commands"]) / 5))
 
-    def embed(self):
+    def _home_embed(self):
+        e = discord.Embed(
+            title="🎰 Casino — help",
+            description=(f"Virtual {CURRENCY} {SYMBOL} only — no real money.\n"
+                         f"Pick a category in the menu below to see its commands."),
+            color=C_GOLD)
+        lines = [f"{c['emoji']}  **{c['label']}** — {len(c['commands'])} command(s)" for c in self.cats]
+        e.add_field(name="📂 Categories", value="\n".join(lines), inline=False)
+        e.set_footer(text=f"prefix {PREFIX}  ·  you are: {self.level}")
+        self.select.placeholder = "📂 Choose a category…"
+        return e
+
+    def _category_embed(self):
         cat = self._cat()
         pages = self._pages()
         self.page = max(0, min(self.page, pages - 1))
@@ -2739,28 +2789,16 @@ class HelpView(discord.ui.View):
                           color=cat["color"])
         for usage, desc, _lvl in chunk:
             e.add_field(name=f"`{usage}`", value=desc, inline=False)
-        e.set_footer(text=f"Page {self.page + 1}/{pages}  ·  {cat['label']}  ·  prefix {PREFIX}")
+        e.set_footer(text=f"Page {self.page + 1}/{pages}  ·  {cat['label']}  ·  pick 🏠 Home to go back")
         self.select.placeholder = f"📂 {cat['label']}"
         return e
 
+    def embed(self):
+        return self._home_embed() if self.cat_index is None else self._category_embed()
+
     async def update(self, interaction):
+        self._rebuild()
         await interaction.response.edit_message(embed=self.embed(), view=self)
-
-    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=1)
-    async def prev_btn(self, interaction, button):
-        if self.page <= 0:
-            await interaction.response.defer()  # already on the first page → does nothing
-            return
-        self.page -= 1
-        await self.update(interaction)
-
-    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=1)
-    async def next_btn(self, interaction, button):
-        if self.page >= self._pages() - 1:
-            await interaction.response.defer()  # already on the last page → does nothing
-            return
-        self.page += 1
-        await self.update(interaction)
 
 
 @bot.command(name="help", aliases=["commands", "casino", "menu", "h"])
