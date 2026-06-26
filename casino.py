@@ -489,23 +489,24 @@ def is_owner_id(uid):
 
 
 def owner_or_admin():
-    """Passes if the user is a bot owner OR has server administrator permission."""
+    """Passes if the user is a bot owner OR has server administrator permission.
+    Otherwise fails silently (the bot does not react at all)."""
     async def predicate(ctx):
         if is_owner_id(ctx.author.id):
             return True
         perms = getattr(ctx.author, "guild_permissions", None)
         if perms is not None and perms.administrator:
             return True
-        raise commands.MissingPermissions(["administrator"])
+        raise commands.CheckFailure("no_access")
     return commands.check(predicate)
 
 
 def owner_only():
-    """Passes only for bot owners (used for destructive commands)."""
+    """Passes only for bot owners. Otherwise fails silently."""
     async def predicate(ctx):
         if is_owner_id(ctx.author.id):
             return True
-        raise commands.MissingPermissions(["administrator"])
+        raise commands.CheckFailure("no_access")
     return commands.check(predicate)
 
 
@@ -2603,40 +2604,163 @@ for _key, _aliases in GAME_ALIASES.items():
 #  HELP
 # ==============================================================================
 
-@bot.command(name="help", aliases=["commands", "casino"])
-async def help_cmd(ctx):
+LEVEL_RANK = {"user": 0, "admin": 1, "owner": 2}
+
+
+def user_level(member):
+    if is_owner_id(member.id):
+        return "owner"
+    perms = getattr(member, "guild_permissions", None)
+    if perms is not None and perms.administrator:
+        return "admin"
+    return "user"
+
+
+def _help_cats():
+    """Each command: (usage, description, min level)."""
     p = PREFIX
-    e = discord.Embed(
-        title="🎰 Casino — command guide",
-        description=f"Virtual {CURRENCY} {SYMBOL} only, no real money.\n"
-                    f"Type a game to open its **bet screen**, set your stake with the buttons, "
-                    f"then **Play** — the game runs on a generated image with control buttons.",
-        color=C_GOLD)
-    e.add_field(
-        name="🎲 Games",
-        value=(f"`{p}mines` · `{p}crash` · `{p}dice` · `{p}limbo` · `{p}plinko` · `{p}wheel`\n"
-               f"`{p}slots` · `{p}keno` · `{p}diamonds` · `{p}case` · `{p}coinflip` · `{p}hilo`\n"
-               f"`{p}dragon` · `{p}chicken` · `{p}pump` · `{p}blackjack` · `{p}roulette` · "
-               f"`{p}baccarat` · `{p}videopoker`"),
-        inline=False)
-    e.add_field(
-        name="💰 Economy",
-        value=(f"`{p}balance [@user]` · `{p}daily` · `{p}work` · `{p}give @user <amt>`\n"
-               f"`{p}leaderboard` · `{p}shop` · `{p}buy <id>`"),
-        inline=False)
-    e.add_field(
-        name="🛠️ Admin / 👑 Owner",
-        value=(f"`{p}addmoney` · `{p}removemoney` · `{p}setmoney` · `{p}resetbalance`\n"
-               f"`{p}additem` · `{p}delitem` · `{p}owners`  ·  owner-only: `{p}wipeeconomy`\n"
-               f"*Owners (set via the `CASINO_OWNERS` variable) can use these anywhere, "
-               f"even without server admin rights.*"),
-        inline=False)
-    e.add_field(
-        name="💡 Bets",
-        value="In the bet screen use −/＋, ½, 2×, Max or ✏️ Custom (e.g. `250`, `1k`, `50%`, `all`).",
-        inline=False)
-    e.set_footer(text=f"Prefix: {p}  ·  Starting balance: {fmt(STARTING_BALANCE)} {CURRENCY}")
-    await ctx.send(embed=e)
+    return [
+        {"key": "games", "label": "Games", "emoji": "🎲", "color": C_INFO, "commands": [
+            (f"{p}mines [bet]", "Reveal gems, avoid the mines, cash out anytime.", "user"),
+            (f"{p}crash [bet]", "Cash out before the rocket crashes.", "user"),
+            (f"{p}dice [bet]", "Roll over or under a target number.", "user"),
+            (f"{p}limbo [bet]", "Pick a target multiplier and beat the roll.", "user"),
+            (f"{p}plinko [bet]", "Drop a ball through the pegs into a multiplier.", "user"),
+            (f"{p}wheel [bet]", "Spin the wheel of fortune.", "user"),
+            (f"{p}slots [bet]", "Classic 3-reel slot machine.", "user"),
+            (f"{p}keno [bet]", "Pick spots and match the draw.", "user"),
+            (f"{p}diamonds [bet]", "Reveal 5 gems and match them for combos.", "user"),
+            (f"{p}case [bet]", "Open a case for a random multiplier.", "user"),
+            (f"{p}coinflip [bet]", "Heads or tails, double or nothing.", "user"),
+            (f"{p}hilo [bet]", "Guess if the next card is higher or lower.", "user"),
+            (f"{p}dragon [bet]", "Climb the Dragon Tower, avoid the dragons.", "user"),
+            (f"{p}chicken [bet]", "Cross the road, cash out before you get hit.", "user"),
+            (f"{p}pump [bet]", "Pump the balloon, cash out before it pops.", "user"),
+            (f"{p}blackjack [bet]", "Beat the dealer to 21 (Hit / Stand / Double).", "user"),
+            (f"{p}roulette [bet]", "Bet on a number, color or section.", "user"),
+            (f"{p}baccarat [bet]", "Bet on Player, Banker or Tie.", "user"),
+            (f"{p}videopoker [bet]", "Jacks or Better — hold cards and draw.", "user"),
+        ]},
+        {"key": "economy", "label": "Economy", "emoji": "💰", "color": C_GOLD, "commands": [
+            (f"{p}balance [@user]", "Check your wallet (or someone else's).", "user"),
+            (f"{p}daily", "Claim your daily reward with a streak bonus.", "user"),
+            (f"{p}work", "Earn some chips on a short cooldown.", "user"),
+            (f"{p}give @user <amount>", "Send chips to another player.", "user"),
+            (f"{p}leaderboard", "See the richest players.", "user"),
+            (f"{p}shop", "Browse items and roles for sale.", "user"),
+            (f"{p}buy <id>", "Buy an item from the shop.", "user"),
+            (f"{p}games", "Quick list of every game.", "user"),
+            (f"{p}owners", "Show the configured bot owners.", "user"),
+        ]},
+        {"key": "admin", "label": "Admin & Owner", "emoji": "🔧", "color": C_GREY, "commands": [
+            (f"{p}addmoney @user <amount>", "Add chips to a user.", "admin"),
+            (f"{p}removemoney @user <amount>", "Remove chips from a user.", "admin"),
+            (f"{p}setmoney @user <amount>", "Set a user's balance.", "admin"),
+            (f"{p}resetbalance @user", "Reset a user to the starting balance.", "admin"),
+            (f"{p}additem <price> [@role] <name>", "Add a shop item (optional role).", "admin"),
+            (f"{p}delitem <id>", "Remove a shop item.", "admin"),
+            (f"{p}wipeeconomy confirm", "Reset EVERYONE's balance — owner only.", "owner"),
+        ]},
+    ]
+
+
+def visible_categories(level):
+    rank = LEVEL_RANK[level]
+    out = []
+    for cat in _help_cats():
+        cmds = [c for c in cat["commands"] if LEVEL_RANK[c[2]] <= rank]
+        if cmds:
+            out.append({**cat, "commands": cmds})
+    return out
+
+
+class HelpSelect(discord.ui.Select):
+    def __init__(self, parent):
+        self.parent = parent
+        options = [
+            discord.SelectOption(label=c["label"], value=str(i), emoji=c["emoji"],
+                                 description=f"{len(c['commands'])} command(s)")
+            for i, c in enumerate(parent.cats)
+        ]
+        super().__init__(placeholder="📂 Choose a category…", options=options, row=0)
+
+    async def callback(self, interaction):
+        self.parent.cat_index = int(self.values[0])
+        self.parent.page = 0
+        await self.parent.update(interaction)
+
+
+class HelpView(discord.ui.View):
+    def __init__(self, author, level):
+        super().__init__(timeout=180)
+        self.author = author
+        self.level = level
+        self.cats = visible_categories(level)
+        self.cat_index = 0
+        self.page = 0
+        self.message = None
+        self.select = HelpSelect(self)
+        self.add_item(self.select)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(f"Run your own `{PREFIX}help` 🙂", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for c in self.children:
+            c.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
+    def _cat(self):
+        return self.cats[self.cat_index]
+
+    def _pages(self):
+        return max(1, math.ceil(len(self._cat()["commands"]) / 5))
+
+    def embed(self):
+        cat = self._cat()
+        pages = self._pages()
+        self.page = max(0, min(self.page, pages - 1))
+        chunk = cat["commands"][self.page * 5:self.page * 5 + 5]
+        e = discord.Embed(title=f"{cat['emoji']}  {cat['label']}",
+                          description=f"Virtual {CURRENCY} {SYMBOL} only — no real money.",
+                          color=cat["color"])
+        for usage, desc, _lvl in chunk:
+            e.add_field(name=f"`{usage}`", value=desc, inline=False)
+        e.set_footer(text=f"Page {self.page + 1}/{pages}  ·  {cat['label']}  ·  prefix {PREFIX}")
+        self.select.placeholder = f"📂 {cat['label']}"
+        return e
+
+    async def update(self, interaction):
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=1)
+    async def prev_btn(self, interaction, button):
+        if self.page <= 0:
+            await interaction.response.defer()  # already on the first page → does nothing
+            return
+        self.page -= 1
+        await self.update(interaction)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=1)
+    async def next_btn(self, interaction, button):
+        if self.page >= self._pages() - 1:
+            await interaction.response.defer()  # already on the last page → does nothing
+            return
+        self.page += 1
+        await self.update(interaction)
+
+
+@bot.command(name="help", aliases=["commands", "casino", "menu", "h"])
+async def help_cmd(ctx):
+    view = HelpView(ctx.author, user_level(ctx.author))
+    view.message = await ctx.send(embed=view.embed(), view=view)
 
 
 @bot.command(name="games")
