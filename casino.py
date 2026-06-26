@@ -684,9 +684,9 @@ async def balance_cmd(ctx, *, member: str = None):
         await ctx.send("❌ User not found."); return
     u = get_user(target.id)
     e = discord.Embed(title=f"{SYMBOL} Wallet — {target.display_name}", color=C_GOLD)
-    e.add_field(name="Balance", value=money(u["balance"]), inline=True)
-    e.add_field(name="Total wagered", value=money(u["wagered"]), inline=True)
-    e.add_field(name="Total won", value=money(u["won"]), inline=True)
+    e.add_field(name="Balance", value=money(u["balance"]), inline=False)
+    e.add_field(name="Total wagered", value=money(u["wagered"]), inline=False)
+    e.add_field(name="Total won", value=money(u["won"]), inline=False)
     e.set_thumbnail(url=target.display_avatar.url)
     await ctx.send(embed=e)
 
@@ -2676,75 +2676,29 @@ def visible_categories(level):
 
 class HelpSelect(discord.ui.Select):
     def __init__(self, parent):
-        options = [discord.SelectOption(label="🏠 Home", value="home",
-                                        description="Back to the categories overview")]
+        self.parent = parent
+        options = [discord.SelectOption(label="Home", value="home", emoji="🏠",
+                                        description="Categories overview")]
         options += [
-            discord.SelectOption(label=f"{c['emoji']} {c['label']}", value=str(i),
+            discord.SelectOption(label=c["label"], value=str(i), emoji=c["emoji"],
                                  description=f"{len(c['commands'])} command(s)")
             for i, c in enumerate(parent.cats)
         ]
-        super().__init__(placeholder="📂 Choose a category…", options=options, row=0)
-        self.parent = parent
+        super().__init__(placeholder="Choose a category…", options=options)
 
     async def callback(self, interaction):
-        try:
-            v = self.values[0]
-            self.parent.cat_index = None if v == "home" else int(v)
-            self.parent.page = 0
-            await self.parent.update(interaction)
-        except Exception:
-            try:
-                await interaction.response.defer()
-            except Exception:
-                pass
+        v = self.values[0]
+        self.parent.cat_index = None if v == "home" else int(v)
+        await interaction.response.edit_message(embed=self.parent.embed(), view=self.parent)
 
 
-class HelpPrev(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="◀ Prev", style=discord.ButtonStyle.secondary, row=1)
-
-    async def callback(self, interaction):
-        v = self.view
-        if v.cat_index is None or v.page <= 0:
-            await interaction.response.defer()  # already first page → nothing
-            return
-        v.page -= 1
-        await v.update(interaction)
-
-
-class HelpNext(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Next ▶", style=discord.ButtonStyle.secondary, row=1)
-
-    async def callback(self, interaction):
-        v = self.view
-        if v.cat_index is None or v.page >= v._pages() - 1:
-            await interaction.response.defer()  # already last page → nothing
-            return
-        v.page += 1
-        await v.update(interaction)
-
-
-class HelpView(discord.ui.View):
+class HelpView(OwnerView):
     def __init__(self, author, level):
-        super().__init__(timeout=180)
-        self.author = author
+        super().__init__(author, timeout=180)
         self.level = level
         self.cats = visible_categories(level)
         self.cat_index = None  # None = home screen
-        self.page = 0
-        self.message = None
-        self.select = HelpSelect(self)
-        self.prev = HelpPrev()
-        self.next = HelpNext()
-        self._rebuild()
-
-    def _rebuild(self):
-        self.clear_items()
-        self.add_item(self.select)
-        if self.cat_index is not None:  # pagination buttons only inside a category
-            self.add_item(self.prev)
-            self.add_item(self.next)
+        self.add_item(HelpSelect(self))
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.author.id:
@@ -2752,53 +2706,25 @@ class HelpView(discord.ui.View):
             return False
         return True
 
-    async def on_timeout(self):
-        for c in self.children:
-            c.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except Exception:
-                pass
-
-    def _cat(self):
-        return self.cats[self.cat_index]
-
-    def _pages(self):
-        return max(1, math.ceil(len(self._cat()["commands"]) / 5))
-
-    def _home_embed(self):
-        e = discord.Embed(
-            title="🎰 Casino — help",
-            description=(f"Virtual {CURRENCY} {SYMBOL} only — no real money.\n"
-                         f"Pick a category in the menu below to see its commands."),
-            color=C_GOLD)
-        lines = [f"{c['emoji']}  **{c['label']}** — {len(c['commands'])} command(s)" for c in self.cats]
-        e.add_field(name="📂 Categories", value="\n".join(lines), inline=False)
-        e.set_footer(text=f"prefix {PREFIX}  ·  you are: {self.level}")
-        self.select.placeholder = "📂 Choose a category…"
-        return e
-
-    def _category_embed(self):
-        cat = self._cat()
-        pages = self._pages()
-        self.page = max(0, min(self.page, pages - 1))
-        chunk = cat["commands"][self.page * 5:self.page * 5 + 5]
+    def embed(self):
+        if self.cat_index is None:
+            e = discord.Embed(
+                title="🎰 Casino — help",
+                description=(f"Virtual {CURRENCY} {SYMBOL} only — no real money.\n"
+                             f"Pick a category in the menu below."),
+                color=C_GOLD)
+            lines = [f"{c['emoji']}  **{c['label']}** — {len(c['commands'])} command(s)" for c in self.cats]
+            e.add_field(name="Categories", value="\n".join(lines), inline=False)
+            e.set_footer(text=f"prefix {PREFIX}")
+            return e
+        cat = self.cats[self.cat_index]
         e = discord.Embed(title=f"{cat['emoji']}  {cat['label']}",
                           description=f"Virtual {CURRENCY} {SYMBOL} only — no real money.",
                           color=cat["color"])
-        for usage, desc, _lvl in chunk:
+        for usage, desc, _lvl in cat["commands"]:
             e.add_field(name=f"`{usage}`", value=desc, inline=False)
-        e.set_footer(text=f"Page {self.page + 1}/{pages}  ·  {cat['label']}  ·  pick 🏠 Home to go back")
-        self.select.placeholder = f"📂 {cat['label']}"
+        e.set_footer(text=f"{cat['label']}  ·  pick 🏠 Home to go back  ·  prefix {PREFIX}")
         return e
-
-    def embed(self):
-        return self._home_embed() if self.cat_index is None else self._category_embed()
-
-    async def update(self, interaction):
-        self._rebuild()
-        await interaction.response.edit_message(embed=self.embed(), view=self)
 
 
 @bot.command(name="help", aliases=["commands", "casino", "menu", "h"])
@@ -2808,8 +2734,7 @@ async def help_cmd(ctx):
         view.message = await ctx.send(embed=view.embed(), view=view)
     except Exception:
         import traceback
-        traceback.print_exc()  # shows the real error in the Railway logs
-        # Plain text fallback so help always works even if the menu fails
+        traceback.print_exc()  # real error appears in the Railway logs
         lvl = user_level(ctx.author)
         e = discord.Embed(title="🎰 Casino — commands",
                           description=f"Virtual {CURRENCY} {SYMBOL} only — no real money.",
