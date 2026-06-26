@@ -2676,18 +2676,24 @@ def visible_categories(level):
 
 class HelpSelect(discord.ui.Select):
     def __init__(self, parent):
-        self.parent = parent
         options = [
-            discord.SelectOption(label=c["label"], value=str(i), emoji=c["emoji"],
+            discord.SelectOption(label=f"{c['emoji']} {c['label']}", value=str(i),
                                  description=f"{len(c['commands'])} command(s)")
             for i, c in enumerate(parent.cats)
         ]
         super().__init__(placeholder="📂 Choose a category…", options=options, row=0)
+        self.parent = parent
 
     async def callback(self, interaction):
-        self.parent.cat_index = int(self.values[0])
-        self.parent.page = 0
-        await self.parent.update(interaction)
+        try:
+            self.parent.cat_index = int(self.values[0])
+            self.parent.page = 0
+            await self.parent.update(interaction)
+        except Exception:
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
 
 
 class HelpView(discord.ui.View):
@@ -2759,8 +2765,26 @@ class HelpView(discord.ui.View):
 
 @bot.command(name="help", aliases=["commands", "casino", "menu", "h"])
 async def help_cmd(ctx):
-    view = HelpView(ctx.author, user_level(ctx.author))
-    view.message = await ctx.send(embed=view.embed(), view=view)
+    try:
+        view = HelpView(ctx.author, user_level(ctx.author))
+        view.message = await ctx.send(embed=view.embed(), view=view)
+    except Exception:
+        import traceback
+        traceback.print_exc()  # shows the real error in the Railway logs
+        # Plain text fallback so help always works even if the menu fails
+        lvl = user_level(ctx.author)
+        e = discord.Embed(title="🎰 Casino — commands",
+                          description=f"Virtual {CURRENCY} {SYMBOL} only — no real money.",
+                          color=C_GOLD)
+        for cat in visible_categories(lvl):
+            cmds = cat["commands"]
+            for i in range(0, len(cmds), 8):
+                part = cmds[i:i + 8]
+                val = "\n".join(f"`{u}` — {d}" for u, d, _l in part)
+                title = f"{cat['emoji']} {cat['label']}" + ("" if i == 0 else " (cont.)")
+                e.add_field(name=title, value=val, inline=False)
+        e.set_footer(text=f"prefix {PREFIX}")
+        await ctx.send(embed=e)
 
 
 @bot.command(name="games")
