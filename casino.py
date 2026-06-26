@@ -2674,80 +2674,60 @@ def visible_categories(level):
     return out
 
 
+def help_home_embed(cats):
+    e = discord.Embed(
+        title="🎰 Casino — help",
+        description=(f"Virtual {CURRENCY} {SYMBOL} only — no real money.\n"
+                     f"Pick a category in the menu below."),
+        color=C_GOLD)
+    e.add_field(
+        name="Categories",
+        value="\n".join(f"{c['emoji']}  **{c['label']}** — {len(c['commands'])} command(s)" for c in cats),
+        inline=False)
+    e.set_footer(text=f"prefix {PREFIX}")
+    return e
+
+
+def help_category_embed(cat):
+    e = discord.Embed(title=f"{cat['emoji']}  {cat['label']}",
+                      description=f"Virtual {CURRENCY} {SYMBOL} only — no real money.",
+                      color=cat["color"])
+    for usage, desc, _lvl in cat["commands"]:
+        e.add_field(name=f"`{usage}`", value=desc, inline=False)
+    e.set_footer(text=f"pick 🏠 Home to go back  ·  prefix {PREFIX}")
+    return e
+
+
 class HelpSelect(discord.ui.Select):
-    def __init__(self, parent):
-        self.parent = parent
-        options = [discord.SelectOption(label="Home", value="home", emoji="🏠",
-                                        description="Categories overview")]
-        options += [
-            discord.SelectOption(label=c["label"], value=str(i), emoji=c["emoji"],
-                                 description=f"{len(c['commands'])} command(s)")
-            for i, c in enumerate(parent.cats)
-        ]
-        super().__init__(placeholder="Choose a category…", options=options)
+    def __init__(self, cats):
+        self.cats = cats
+        opts = [discord.SelectOption(label="🏠 Home", value="home")]
+        opts += [discord.SelectOption(label=f"{c['emoji']} {c['label']}", value=str(i))
+                 for i, c in enumerate(cats)]
+        super().__init__(placeholder="Choose a category…", options=opts)
 
     async def callback(self, interaction):
         v = self.values[0]
-        self.parent.cat_index = None if v == "home" else int(v)
-        await interaction.response.edit_message(embed=self.parent.embed(), view=self.parent)
+        embed = help_home_embed(self.cats) if v == "home" else help_category_embed(self.cats[int(v)])
+        await interaction.response.edit_message(embed=embed, view=self.view)
 
 
 class HelpView(OwnerView):
     def __init__(self, author, level):
         super().__init__(author, timeout=180)
-        self.level = level
-        self.cats = visible_categories(level)
-        self.cat_index = None  # None = home screen
-        self.add_item(HelpSelect(self))
-
-    async def interaction_check(self, interaction):
-        if interaction.user.id != self.author.id:
-            await interaction.response.send_message(f"Run your own `{PREFIX}help` 🙂", ephemeral=True)
-            return False
-        return True
-
-    def embed(self):
-        if self.cat_index is None:
-            e = discord.Embed(
-                title="🎰 Casino — help",
-                description=(f"Virtual {CURRENCY} {SYMBOL} only — no real money.\n"
-                             f"Pick a category in the menu below."),
-                color=C_GOLD)
-            lines = [f"{c['emoji']}  **{c['label']}** — {len(c['commands'])} command(s)" for c in self.cats]
-            e.add_field(name="Categories", value="\n".join(lines), inline=False)
-            e.set_footer(text=f"prefix {PREFIX}")
-            return e
-        cat = self.cats[self.cat_index]
-        e = discord.Embed(title=f"{cat['emoji']}  {cat['label']}",
-                          description=f"Virtual {CURRENCY} {SYMBOL} only — no real money.",
-                          color=cat["color"])
-        for usage, desc, _lvl in cat["commands"]:
-            e.add_field(name=f"`{usage}`", value=desc, inline=False)
-        e.set_footer(text=f"{cat['label']}  ·  pick 🏠 Home to go back  ·  prefix {PREFIX}")
-        return e
+        self.add_item(HelpSelect(visible_categories(level)))
 
 
 @bot.command(name="help", aliases=["commands", "casino", "menu", "h"])
 async def help_cmd(ctx):
+    cats = visible_categories(user_level(ctx.author))
     try:
-        view = HelpView(ctx.author, user_level(ctx.author))
-        view.message = await ctx.send(embed=view.embed(), view=view)
-    except Exception:
+        await ctx.send(embed=help_home_embed(cats),
+                       view=HelpView(ctx.author, user_level(ctx.author)))
+    except Exception as exc:
         import traceback
-        traceback.print_exc()  # real error appears in the Railway logs
-        lvl = user_level(ctx.author)
-        e = discord.Embed(title="🎰 Casino — commands",
-                          description=f"Virtual {CURRENCY} {SYMBOL} only — no real money.",
-                          color=C_GOLD)
-        for cat in visible_categories(lvl):
-            cmds = cat["commands"]
-            for i in range(0, len(cmds), 8):
-                part = cmds[i:i + 8]
-                val = "\n".join(f"`{u}` — {d}" for u, d, _l in part)
-                title = f"{cat['emoji']} {cat['label']}" + ("" if i == 0 else " (cont.)")
-                e.add_field(name=title, value=val, inline=False)
-        e.set_footer(text=f"prefix {PREFIX}")
-        await ctx.send(embed=e)
+        traceback.print_exc()  # full traceback in the Railway logs
+        await ctx.send(f"⚠️ Help menu failed to load: `{type(exc).__name__}: {exc}`")
 
 
 @bot.command(name="games")
