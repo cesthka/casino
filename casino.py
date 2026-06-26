@@ -135,6 +135,9 @@ def init_db():
     conn.execute("""CREATE TABLE IF NOT EXISTS allowed_channels (
         channel_id INTEGER PRIMARY KEY
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS whitelist (
+        user_id INTEGER PRIMARY KEY
+    )""")
     conn.commit(); conn.close()
 
 
@@ -248,6 +251,45 @@ def remove_allowed_channel(cid):
 
 
 ALLOWED_CHANNELS = load_allowed_channels()
+
+
+def load_whitelist():
+    conn = db()
+    rows = conn.execute("SELECT user_id FROM whitelist").fetchall()
+    conn.close()
+    return {r[0] for r in rows}
+
+
+def add_whitelist(uid):
+    conn = db()
+    conn.execute("INSERT OR IGNORE INTO whitelist (user_id) VALUES (?)", (uid,))
+    conn.commit(); conn.close()
+    WHITELIST.add(uid)
+
+
+def remove_whitelist(uid):
+    conn = db()
+    conn.execute("DELETE FROM whitelist WHERE user_id=?", (uid,))
+    conn.commit(); conn.close()
+    WHITELIST.discard(uid)
+
+
+WHITELIST = load_whitelist()
+
+
+def is_whitelisted(uid):
+    return uid in WHITELIST
+
+
+def parse_user_id(ref):
+    """Accept a mention (<@id> / <@!id>) or a raw numeric ID."""
+    if ref is None:
+        return None
+    s = str(ref).strip()
+    m = re.match(r"^<@!?(\d+)>$", s)
+    if m:
+        return int(m.group(1))
+    return int(s) if s.isdigit() else None
 
 # ==============================================================================
 #  HELPERS
@@ -537,9 +579,19 @@ def owner_only():
     return commands.check(predicate)
 
 
+def wl_or_owner():
+    """Passes for bot owners AND whitelisted users (owner perms except the
+    server-wide reset). Otherwise fails silently."""
+    async def predicate(ctx):
+        if is_owner_id(ctx.author.id) or is_whitelisted(ctx.author.id):
+            return True
+        raise commands.CheckFailure("no_access")
+    return commands.check(predicate)
+
+
 # Commands that work in ANY channel (so admins can configure / manage from anywhere).
 CHANNEL_EXEMPT = {
-    "allow", "unallow", "allowed",
+    "allow", "unallow", "allowed", "wl", "unwl",
     "addmoney", "removemoney", "setmoney", "resetbalance",
     "additem", "delitem", "wipeeconomy", "owners",
 }
@@ -847,7 +899,7 @@ async def buy_cmd(ctx, item_id: int = None):
 
 
 @bot.command(name="additem")
-@owner_or_admin()
+@wl_or_owner()
 async def additem_cmd(ctx, price: int = None, role: discord.Role = None, *, name: str = None):
     if price is None or name is None:
         await ctx.send(f"Usage: `{PREFIX}additem <price> [@role] <name>`"); return
@@ -856,7 +908,7 @@ async def additem_cmd(ctx, price: int = None, role: discord.Role = None, *, name
 
 
 @bot.command(name="delitem", aliases=["removeitem"])
-@owner_or_admin()
+@wl_or_owner()
 async def delitem_cmd(ctx, item_id: int = None):
     if item_id is None:
         await ctx.send(f"Usage: `{PREFIX}delitem <id>`"); return
@@ -864,7 +916,7 @@ async def delitem_cmd(ctx, item_id: int = None):
 
 
 @bot.command(name="addmoney", aliases=["addcoins"])
-@owner_or_admin()
+@wl_or_owner()
 async def addmoney_cmd(ctx, member: str = None, amount: int = None):
     if member is None or amount is None:
         await ctx.send(f"Usage: `{PREFIX}addmoney @user <amount>`"); return
@@ -876,7 +928,7 @@ async def addmoney_cmd(ctx, member: str = None, amount: int = None):
 
 
 @bot.command(name="removemoney", aliases=["removecoins"])
-@owner_or_admin()
+@wl_or_owner()
 async def removemoney_cmd(ctx, member: str = None, amount: int = None):
     if member is None or amount is None:
         await ctx.send(f"Usage: `{PREFIX}removemoney @user <amount>`"); return
@@ -888,7 +940,7 @@ async def removemoney_cmd(ctx, member: str = None, amount: int = None):
 
 
 @bot.command(name="setmoney", aliases=["setcoins", "setbalance"])
-@owner_or_admin()
+@wl_or_owner()
 async def setmoney_cmd(ctx, member: str = None, amount: int = None):
     if member is None or amount is None:
         await ctx.send(f"Usage: `{PREFIX}setmoney @user <amount>`"); return
@@ -902,7 +954,7 @@ async def setmoney_cmd(ctx, member: str = None, amount: int = None):
 # ---- OWNER-ONLY ----------------------------------------------------------------
 
 @bot.command(name="resetbalance", aliases=["resetbal", "resetuser"])
-@owner_or_admin()
+@wl_or_owner()
 async def resetbalance_cmd(ctx, member: str = None):
     if member is None:
         await ctx.send(f"Usage: `{PREFIX}resetbalance @user`"); return
@@ -937,7 +989,7 @@ async def owners_cmd(ctx):
 
 
 @bot.command(name="allow")
-@owner_or_admin()
+@wl_or_owner()
 async def allow_cmd(ctx, channel: discord.TextChannel = None):
     channel = channel or ctx.channel
     add_allowed_channel(channel.id)
@@ -948,7 +1000,7 @@ async def allow_cmd(ctx, channel: discord.TextChannel = None):
 
 
 @bot.command(name="unallow", aliases=["disallow"])
-@owner_or_admin()
+@wl_or_owner()
 async def unallow_cmd(ctx, channel: discord.TextChannel = None):
     channel = channel or ctx.channel
     remove_allowed_channel(channel.id)
@@ -957,7 +1009,7 @@ async def unallow_cmd(ctx, channel: discord.TextChannel = None):
 
 
 @bot.command(name="allowed", aliases=["allowlist", "channels"])
-@owner_or_admin()
+@wl_or_owner()
 async def allowed_cmd(ctx):
     if not ALLOWED_CHANNELS:
         await ctx.send("No channels are allowed yet, so players can't use the casino anywhere.\n"
@@ -968,6 +1020,44 @@ async def allowed_cmd(ctx):
         mentions.append(ch.mention if ch else f"`{cid}`")
     await ctx.send(embed=discord.Embed(title="📺 Allowed channels",
                                        description=", ".join(mentions), color=C_INFO))
+
+
+@bot.command(name="wl", aliases=["whitelist"])
+@owner_only()
+async def wl_cmd(ctx, *, ref: str = None):
+    if ref is None:  # no id/ping -> show the whitelist
+        if not WHITELIST:
+            await ctx.send("The whitelist is empty. Add someone with "
+                           f"`{PREFIX}wl @user` or `{PREFIX}wl <id>`."); return
+        lines = [f"• <@{uid}> (`{uid}`)" for uid in WHITELIST]
+        e = discord.Embed(title="⭐ Whitelist", color=C_GOLD,
+                          description="\n".join(lines) +
+                          f"\n\nThey can use the owner commands **except** `{PREFIX}wipeeconomy`.")
+        await ctx.send(embed=e); return
+    uid = parse_user_id(ref)
+    if uid is None:
+        await ctx.send("❌ Give a valid mention or user ID."); return
+    if is_owner_id(uid):
+        await ctx.send("That user is already a bot **owner** (full access)."); return
+    if uid in WHITELIST:
+        await ctx.send("That user is already whitelisted."); return
+    add_whitelist(uid)
+    await ctx.send(f"⭐ <@{uid}> (`{uid}`) is now **whitelisted** — they can use the owner "
+                   f"commands except `{PREFIX}wipeeconomy`.")
+
+
+@bot.command(name="unwl", aliases=["unwhitelist"])
+@owner_only()
+async def unwl_cmd(ctx, *, ref: str = None):
+    if ref is None:
+        await ctx.send(f"Usage: `{PREFIX}unwl @user` or `{PREFIX}unwl <id>`."); return
+    uid = parse_user_id(ref)
+    if uid is None:
+        await ctx.send("❌ Give a valid mention or user ID."); return
+    if uid not in WHITELIST:
+        await ctx.send("That user isn't on the whitelist."); return
+    remove_whitelist(uid)
+    await ctx.send(f"✅ <@{uid}> (`{uid}`) has been removed from the whitelist.")
 
 
 # ==============================================================================
@@ -2693,13 +2783,17 @@ for _key, _aliases in GAME_ALIASES.items():
 #  HELP
 # ==============================================================================
 
-LEVEL_RANK = {"user": 0, "admin": 1, "owner": 2}
+LEVEL_RANK = {"user": 0, "wl": 1, "owner": 2}
 
 
 def user_level(member):
-    # Only the bot owner(s) see the full help. Everyone else — including
-    # Discord server admins — only sees the public commands.
-    return "owner" if is_owner_id(member.id) else "user"
+    # Owner sees everything; whitelisted users see the owner commands except
+    # the server-wide reset; everyone else only sees the public commands.
+    if is_owner_id(member.id):
+        return "owner"
+    if is_whitelisted(member.id):
+        return "wl"
+    return "user"
 
 
 def _help_cats():
@@ -2738,17 +2832,19 @@ def _help_cats():
             (f"{p}games", "Quick list of every game.", "user"),
             (f"{p}owners", "Show the configured bot owners.", "user"),
         ]},
-        {"key": "admin", "label": "Admin & Owner", "emoji": "🔧", "color": C_GREY, "commands": [
-            (f"{p}allow [#channel]", "Enable casino commands in a channel.", "admin"),
-            (f"{p}unallow [#channel]", "Disable casino commands in a channel.", "admin"),
-            (f"{p}allowed", "List the channels where the casino is enabled.", "admin"),
-            (f"{p}addmoney @user <amount>", "Add chips to a user.", "admin"),
-            (f"{p}removemoney @user <amount>", "Remove chips from a user.", "admin"),
-            (f"{p}setmoney @user <amount>", "Set a user's balance.", "admin"),
-            (f"{p}resetbalance @user", "Reset a user to the starting balance.", "admin"),
-            (f"{p}additem <price> [@role] <name>", "Add a shop item (optional role).", "admin"),
-            (f"{p}delitem <id>", "Remove a shop item.", "admin"),
-            (f"{p}wipeeconomy confirm", "Reset EVERYONE's balance — owner only.", "owner"),
+        {"key": "admin", "label": "Staff & Owner", "emoji": "🔧", "color": C_GREY, "commands": [
+            (f"{p}allow [#channel]", "Enable casino commands in a channel.", "wl"),
+            (f"{p}unallow [#channel]", "Disable casino commands in a channel.", "wl"),
+            (f"{p}allowed", "List the channels where the casino is enabled.", "wl"),
+            (f"{p}addmoney @user <amount>", "Add chips to a user.", "wl"),
+            (f"{p}removemoney @user <amount>", "Remove chips from a user.", "wl"),
+            (f"{p}setmoney @user <amount>", "Set a user's balance.", "wl"),
+            (f"{p}resetbalance @user", "Reset a single user to the starting balance.", "wl"),
+            (f"{p}additem <price> [@role] <name>", "Add a shop item (optional role).", "wl"),
+            (f"{p}delitem <id>", "Remove a shop item.", "wl"),
+            (f"{p}wl [@user]", "Whitelist a user (no arg = show the list). Owner only.", "owner"),
+            (f"{p}unwl @user", "Remove a user from the whitelist. Owner only.", "owner"),
+            (f"{p}wipeeconomy confirm", "Reset EVERYONE's balance. Owner only.", "owner"),
         ]},
     ]
 
@@ -2839,6 +2935,7 @@ async def on_ready():
     print(f"Logged in as {bot.user} (id: {bot.user.id})")
     print(f"Prefix: {PREFIX}  ·  Pillow: {'OK' if PIL_OK else 'MISSING'}  ·  {len(bot.guilds)} guild(s)")
     print(f"Owners configured: {sorted(OWNER_IDS) if OWNER_IDS else 'NONE (set CASINO_OWNERS)'}")
+    print(f"Whitelisted: {sorted(WHITELIST) if WHITELIST else 'none'}  ·  Allowed channels: {len(ALLOWED_CHANNELS)}")
     try:
         await bot.change_presence(activity=discord.Game(name=f"{PREFIX}help · 🎰"))
     except Exception:
