@@ -132,6 +132,9 @@ def init_db():
         role_id INTEGER,
         description TEXT
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS allowed_channels (
+        channel_id INTEGER PRIMARY KEY
+    )""")
     conn.commit(); conn.close()
 
 
@@ -221,6 +224,30 @@ def shop_del(item_id):
 
 
 init_db()
+
+
+def load_allowed_channels():
+    conn = db()
+    rows = conn.execute("SELECT channel_id FROM allowed_channels").fetchall()
+    conn.close()
+    return {r[0] for r in rows}
+
+
+def add_allowed_channel(cid):
+    conn = db()
+    conn.execute("INSERT OR IGNORE INTO allowed_channels (channel_id) VALUES (?)", (cid,))
+    conn.commit(); conn.close()
+    ALLOWED_CHANNELS.add(cid)
+
+
+def remove_allowed_channel(cid):
+    conn = db()
+    conn.execute("DELETE FROM allowed_channels WHERE channel_id=?", (cid,))
+    conn.commit(); conn.close()
+    ALLOWED_CHANNELS.discard(cid)
+
+
+ALLOWED_CHANNELS = load_allowed_channels()
 
 # ==============================================================================
 #  HELPERS
@@ -508,6 +535,34 @@ def owner_only():
             return True
         raise commands.CheckFailure("no_access")
     return commands.check(predicate)
+
+
+# Commands that work in ANY channel (so admins can configure / manage from anywhere).
+CHANNEL_EXEMPT = {
+    "allow", "unallow", "allowed",
+    "addmoney", "removemoney", "setmoney", "resetbalance",
+    "additem", "delitem", "wipeeconomy", "owners",
+}
+
+
+@bot.check
+async def channel_is_allowed(ctx):
+    """Block casino commands in channels that aren't allowed.
+    Owners can use commands anywhere; admins can still run the management
+    commands (allow/unallow/...) from any channel to set things up.
+    Fails silently (the bot doesn't react) in non-allowed channels."""
+    if ctx.command is not None and ctx.command.name in CHANNEL_EXEMPT:
+        return True
+    if is_owner_id(ctx.author.id):
+        return True
+    if ctx.guild is None:
+        return False
+    if ctx.channel.id in ALLOWED_CHANNELS:
+        return True
+    parent_id = getattr(ctx.channel, "parent_id", None)  # threads inherit their parent
+    if parent_id and parent_id in ALLOWED_CHANNELS:
+        return True
+    return False
 
 
 class OwnerView(discord.ui.View):
@@ -879,6 +934,40 @@ async def owners_cmd(ctx):
     is_o = "✅ You are an owner." if is_owner_id(ctx.author.id) else "You are not an owner."
     await ctx.send(embed=discord.Embed(title="👑 Bot owners",
                                        description="\n".join(lines) + f"\n\n{is_o}", color=C_GOLD))
+
+
+@bot.command(name="allow")
+@owner_or_admin()
+async def allow_cmd(ctx, channel: discord.TextChannel = None):
+    channel = channel or ctx.channel
+    add_allowed_channel(channel.id)
+    e = discord.Embed(title="✅ Channel enabled",
+                      description=f"Casino commands can now be used in {channel.mention}.",
+                      color=C_WIN)
+    await ctx.send(embed=e)
+
+
+@bot.command(name="unallow", aliases=["disallow"])
+@owner_or_admin()
+async def unallow_cmd(ctx, channel: discord.TextChannel = None):
+    channel = channel or ctx.channel
+    remove_allowed_channel(channel.id)
+    await ctx.send(f"🚫 Casino commands are now disabled in {channel.mention} "
+                   "(owners can still use them anywhere).")
+
+
+@bot.command(name="allowed", aliases=["allowlist", "channels"])
+@owner_or_admin()
+async def allowed_cmd(ctx):
+    if not ALLOWED_CHANNELS:
+        await ctx.send("No channels are allowed yet, so players can't use the casino anywhere.\n"
+                       f"Use `{PREFIX}allow` in the channel you want to open."); return
+    mentions = []
+    for cid in ALLOWED_CHANNELS:
+        ch = ctx.guild.get_channel(cid) if ctx.guild else None
+        mentions.append(ch.mention if ch else f"`{cid}`")
+    await ctx.send(embed=discord.Embed(title="📺 Allowed channels",
+                                       description=", ".join(mentions), color=C_INFO))
 
 
 # ==============================================================================
@@ -2653,6 +2742,9 @@ def _help_cats():
             (f"{p}owners", "Show the configured bot owners.", "user"),
         ]},
         {"key": "admin", "label": "Admin & Owner", "emoji": "🔧", "color": C_GREY, "commands": [
+            (f"{p}allow [#channel]", "Enable casino commands in a channel.", "admin"),
+            (f"{p}unallow [#channel]", "Disable casino commands in a channel.", "admin"),
+            (f"{p}allowed", "List the channels where the casino is enabled.", "admin"),
             (f"{p}addmoney @user <amount>", "Add chips to a user.", "admin"),
             (f"{p}removemoney @user <amount>", "Remove chips from a user.", "admin"),
             (f"{p}setmoney @user <amount>", "Set a user's balance.", "admin"),
