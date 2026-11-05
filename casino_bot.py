@@ -44,7 +44,7 @@ from itertools import product
 from datetime import datetime, timezone
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    import PIL  # noqa: F401 — Pillow est requis par casino_gfx.py
 except ImportError:
     print("[ERREUR CRITIQUE] Pillow n'est pas installé : ajoute 'Pillow' dans requirements.txt.")
     sys.exit(1)
@@ -701,12 +701,15 @@ SLOT_TRIPLE = [round(m * _k, 2) for m in _SLOT_TRIPLE_BASE]
 SLOT_TWO_CHERRY = round(_SLOT_TWO_CHERRY_BASE * _k, 2)
 
 
-# ========================= MOTEUR D'IMAGES =========================
+# ========================= IMAGES (moteur casino_gfx.py) =========================
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import casino_gfx as gx  # noqa: E402
+
+gx.set_fonts_dir(FONTS_DIR)
 FONT_URLS = {w: f"https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-{w}.ttf"
              for w in ("ExtraBold", "Bold", "SemiBold", "Medium", "Regular")}
-_SYS_FONTS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
-_FONT_CACHE = {}
+SLOT_PAYTABLE = [f"{n} {m:g}x" for n, m in zip(["Cerise", "Citron", "Raisin", "Cloche", "Étoile", "Diamant", "777"], SLOT_TRIPLE)]
 
 
 def ensure_fonts():
@@ -722,91 +725,7 @@ def ensure_fonts():
                 f.write(data)
         except Exception as e:
             log.warning(f"Police {w} non téléchargée ({e}) : police de secours utilisée.")
-
-
-_FALLBACK_FONT = {"used": False}
-
-
-def F(size, weight="Regular"):
-    key = (size, weight)
-    if key in _FONT_CACHE:
-        return _FONT_CACHE[key]
-    font = None
-    for path in [os.path.join(FONTS_DIR, f"Poppins-{weight}.ttf")] + _SYS_FONTS:
-        if os.path.exists(path):
-            try:
-                font = ImageFont.truetype(path, size)
-                break
-            except OSError:
-                continue
-    if font is None:
-        _FALLBACK_FONT["used"] = True
-        try:
-            font = ImageFont.load_default(size=size)
-        except TypeError:
-            font = ImageFont.load_default()
-    _FONT_CACHE[key] = font
-    return font
-
-
-def _ascii(text):
-    import unicodedata
-    return "".join(c for c in unicodedata.normalize("NFKD", str(text)) if not unicodedata.combining(c))
-
-
-class SafeDraw(ImageDraw.ImageDraw):
-    """Si la police de secours (sans accents) est utilisée, on retire les accents pour éviter les carrés."""
-
-    def text(self, xy, text, *a, **kw):
-        return super().text(xy, _ascii(text) if _FALLBACK_FONT["used"] else text, *a, **kw)
-
-    def textlength(self, text, *a, **kw):
-        return super().textlength(_ascii(text) if _FALLBACK_FONT["used"] else text, *a, **kw)
-
-
-W, H = 880, 500
-WHITE = (255, 255, 255)
-GREY = (170, 178, 190)
-DARK = (40, 44, 52)
-RED = (231, 76, 60)
-GREEN = (46, 204, 113)
-GOLD = (241, 196, 15)
-CY = (96 + H - 88) / 2
-_BG_CACHE = {}
-
-
-def _mix(a, b, t):
-    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
-
-
-def _background(accent):
-    if accent not in _BG_CACHE:
-        img = Image.new("RGB", (W, H))
-        d = ImageDraw.Draw(img)
-        c1, c2 = _mix(accent, (20, 20, 26), 0.82), (10, 10, 14)
-        for y in range(H):
-            d.line([(0, y), (W, y)], fill=_mix(c1, c2, y / (H - 1)))
-        d.rectangle([0, 0, W, 6], fill=accent)
-        d.rounded_rectangle([34, 92, W - 34, H - 88], radius=22, outline=_mix(accent, (255, 255, 255), 0.1), width=2)
-        _BG_CACHE[accent] = img
-    return _BG_CACHE[accent].copy()
-
-
-def base_canvas(accent, title):
-    img = _background(accent)
-    d = SafeDraw(img)
-    d.text((38, 26), title, font=F(34, "ExtraBold"), fill=WHITE)
-    return img, d
-
-
-def draw_footer(d, accent, bet, balance, status, status_color=None):
-    y = H - 70
-    d.line([(40, y), (W - 40, y)], fill=(60, 64, 72), width=1)
-    d.text((40, y + 12), f"Mise  {fmt(bet)}", font=F(22, "SemiBold"), fill=WHITE)
-    txt = f"Solde  {fmt(balance)}"
-    d.text((W - 40 - d.textlength(txt, font=F(22, "SemiBold")), y + 12), txt, font=F(22, "SemiBold"), fill=GREY)
-    if status:
-        d.text((W - 40, 46), status, font=F(20, "SemiBold"), fill=status_color or accent, anchor="rm")
+    gx.set_fonts_dir(FONTS_DIR)
 
 
 def to_file(img, name="game.png"):
@@ -816,105 +735,13 @@ def to_file(img, name="game.png"):
     return discord.File(buf, filename=name)
 
 
-def _gem(d, cx, cy, s, col):
-    d.polygon([(cx, cy - s), (cx + s, cy), (cx, cy + s), (cx - s, cy)], fill=col, outline=(15, 15, 18))
-    d.polygon([(cx, cy - s), (cx + s * 0.45, cy - s * 0.1), (cx, cy + s * 0.3), (cx - s * 0.45, cy - s * 0.1)],
-              fill=_mix(col, WHITE, 0.35))
-
-
-def _bomb(d, cx, cy, s):
-    d.ellipse([cx - s, cy - s, cx + s, cy + s], fill=(25, 25, 30), outline=RED, width=2)
-    d.line([(cx + s * 0.5, cy - s * 0.8), (cx + s * 0.9, cy - s * 1.3)], fill=(200, 140, 60), width=3)
-    d.ellipse([cx + s * 0.8, cy - s * 1.5, cx + s * 1.1, cy - s * 1.2], fill=GOLD)
-
-
-def _star(d, cx, cy, r, col):
-    pts = []
-    for k in range(10):
-        ang = -math.pi / 2 + k * math.pi / 5
-        rr = r if k % 2 == 0 else r * 0.45
-        pts.append((cx + rr * math.cos(ang), cy + rr * math.sin(ang)))
-    d.polygon(pts, fill=col)
-
-
-def draw_suit(d, cx, cy, s, suit, col):
-    if suit == "D":
-        d.polygon([(cx, cy - s), (cx + s * 0.75, cy), (cx, cy + s), (cx - s * 0.75, cy)], fill=col)
-    elif suit == "H":
-        r = s * 0.52
-        d.ellipse([cx - 2 * r, cy - s * 0.65, cx, cy - s * 0.65 + 2 * r], fill=col)
-        d.ellipse([cx, cy - s * 0.65, cx + 2 * r, cy - s * 0.65 + 2 * r], fill=col)
-        d.polygon([(cx - 2 * r + 1, cy - s * 0.1), (cx + 2 * r - 1, cy - s * 0.1), (cx, cy + s)], fill=col)
-    elif suit == "S":
-        r = s * 0.52
-        d.ellipse([cx - 2 * r, cy - s * 0.35, cx, cy - s * 0.35 + 2 * r], fill=col)
-        d.ellipse([cx, cy - s * 0.35, cx + 2 * r, cy - s * 0.35 + 2 * r], fill=col)
-        d.polygon([(cx - 2 * r + 1, cy + s * 0.2), (cx + 2 * r - 1, cy + s * 0.2), (cx, cy - s)], fill=col)
-        d.polygon([(cx, cy + s * 0.2), (cx - s * 0.35, cy + s), (cx + s * 0.35, cy + s)], fill=col)
-    else:  # C
-        r = s * 0.42
-        for ox, oy in ((0, -s * 0.48), (-s * 0.5, s * 0.12), (s * 0.5, s * 0.12)):
-            d.ellipse([cx + ox - r, cy + oy - r, cx + ox + r, cy + oy + r], fill=col)
-        d.polygon([(cx, cy), (cx - s * 0.35, cy + s), (cx + s * 0.35, cy + s)], fill=col)
-
-
-RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
-SUITS = ["S", "H", "D", "C"]
-
-
-def draw_card(d, x, y, w, h, card, face_up=True, glow=None):
-    if glow:
-        d.rounded_rectangle([x - 4, y - 4, x + w + 4, y + h + 4], radius=14, outline=glow, width=3)
-    if not face_up:
-        d.rounded_rectangle([x, y, x + w, y + h], radius=12, fill=(40, 52, 88), outline=(20, 20, 24), width=2)
-        d.rounded_rectangle([x + 8, y + 8, x + w - 8, y + h - 8], radius=8, fill=(28, 38, 70), outline=(90, 110, 170), width=2)
-        _gem(d, x + w / 2, y + h / 2, min(w, h) * 0.18, (90, 110, 170))
-        return
-    d.rounded_rectangle([x, y, x + w, y + h], radius=12, fill=(245, 246, 248), outline=(20, 20, 24), width=2)
-    rank, suit = card
-    col = (200, 40, 40) if suit in ("H", "D") else (25, 25, 30)
-    d.text((x + 9, y + 4), rank, font=F(int(h * 0.24), "Bold"), fill=col)
-    draw_suit(d, x + 9 + h * 0.07, y + h * 0.36, h * 0.07, suit, col)
-    draw_suit(d, x + w / 2 + w * 0.08, y + h * 0.62, h * 0.17, suit, col)
-
-
-def draw_slot_symbol(d, sym, cx, cy, s):
-    if sym == "cherry":
-        d.line([(cx - s * 0.3, cy), (cx + s * 0.1, cy - s * 0.8)], fill=(60, 140, 60), width=4)
-        d.line([(cx + s * 0.35, cy + s * 0.05), (cx + s * 0.1, cy - s * 0.8)], fill=(60, 140, 60), width=4)
-        for ox in (-s * 0.35, s * 0.35):
-            d.ellipse([cx + ox - s * 0.35, cy - s * 0.05, cx + ox + s * 0.35, cy + s * 0.65], fill=(210, 30, 50))
-    elif sym == "lemon":
-        d.ellipse([cx - s * 0.7, cy - s * 0.5, cx + s * 0.7, cy + s * 0.5], fill=(245, 210, 40), outline=(190, 150, 20), width=3)
-    elif sym == "grape":
-        for k, (ox, oy) in enumerate([(-0.4, -0.4), (0, -0.4), (0.4, -0.4), (-0.2, 0), (0.2, 0), (0, 0.4)]):
-            d.ellipse([cx + ox * s - s * 0.24, cy + oy * s - s * 0.24, cx + ox * s + s * 0.24, cy + oy * s + s * 0.24],
-                      fill=(140, 70, 190), outline=(90, 40, 130))
-    elif sym == "bell":
-        d.polygon([(cx - s * 0.65, cy + s * 0.45), (cx - s * 0.4, cy - s * 0.4), (cx, cy - s * 0.7),
-                   (cx + s * 0.4, cy - s * 0.4), (cx + s * 0.65, cy + s * 0.45)], fill=(243, 170, 30), outline=(180, 110, 10))
-        d.ellipse([cx - s * 0.15, cy + s * 0.4, cx + s * 0.15, cy + s * 0.7], fill=(180, 110, 10))
-    elif sym == "star":
-        _star(d, cx, cy, s * 0.8, GOLD)
-    elif sym == "diamond":
-        _gem(d, cx, cy, s * 0.75, (52, 152, 219))
-    elif sym == "seven":
-        d.text((cx, cy), "7", font=F(int(s * 1.7), "ExtraBold"), fill=(220, 30, 40), anchor="mm")
-    else:
-        d.text((cx, cy), "?", font=F(int(s * 1.4), "ExtraBold"), fill=(120, 120, 130), anchor="mm")
-
-
-def draw_big(d, text, color, y=CY, size=86):
-    d.text((W / 2, y), text, font=F(size, "ExtraBold"), fill=color, anchor="mm")
-
-
 def result_status(bet, payout):
     delta = payout - bet
     if delta > 0:
-        return f"GAGNÉ +{fmt(delta)}", GREEN
+        return f"GAGNÉ +{fmt(delta)}", "win"
     if delta == 0:
-        return "REMBOURSÉ", GREY
-    return f"PERDU -{fmt(-delta)}", RED
+        return "REMBOURSÉ", "push"
+    return f"PERDU -{fmt(-delta)}", "lose"
 
 
 # ========================= BOT SETUP =========================
@@ -1062,11 +889,9 @@ class GameView(OwnerView):
     def render(self, status=None, status_color=None, final=False):
         raise NotImplementedError
 
-    def canvas(self, title=None):
-        return base_canvas(self.theme, title or self.title)
-
-    def footer(self, d, status, status_color=None, accent=None):
-        draw_footer(d, accent or self.theme, self.bet, get_balance(self.author.id), status, status_color)
+    def C(self, status=None, kind=None):
+        """Contexte d'image : titre, couleur, mise, solde, statut (kind = win / lose / push / info)."""
+        return gx.C(self.title, self.theme, self.bet_total(), get_balance(self.author.id), status, kind or "info")
 
     async def frame(self, **kw):
         return await asyncio.to_thread(lambda: to_file(self.render(**kw)))
@@ -1194,12 +1019,7 @@ class BetSetupView(OwnerView):
 
     def render(self):
         name, theme = GAMES[self.key][0], GAMES[self.key][1]
-        img, d = base_canvas(theme, name)
-        d.text((W / 2, CY - 70), "TA MISE", font=F(30, "SemiBold"), fill=GREY, anchor="mm")
-        d.text((W / 2, CY + 6), fmt(self.bet), font=F(76, "ExtraBold"), fill=theme, anchor="mm")
-        d.text((W / 2, CY + 70), "Ajuste ci-dessous puis appuie sur Jouer", font=F(22, "Medium"), fill=GREY, anchor="mm")
-        draw_footer(d, theme, self.bet, get_balance(self.author.id), None)
-        return img
+        return gx.render_betsetup(gx.C(name, theme, self.bet, get_balance(self.author.id)), GAMES[self.key][3])
 
     async def frame(self):
         return await asyncio.to_thread(lambda: to_file(self.render()))
@@ -1300,7 +1120,10 @@ class ChoiceSetupView(GameView):
         super().__init__(author, bet, game, guild)
         self.key_override = key
         self.subtitle, self.hint, self.factory = subtitle, hint, factory
-        for label, value, style in options:
+        self.opt_labels = []
+        for opt in options:
+            label, value, style = opt[:3]
+            self.opt_labels.append((label, opt[3] if len(opt) > 3 else ""))
             btn = discord.ui.Button(label=label, style=style)
             btn.callback = self._make_cb(value)
             self.add_item(btn)
@@ -1321,11 +1144,7 @@ class ChoiceSetupView(GameView):
         return GAMES[self.key_override][0]
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        d.text((W / 2, CY - 14), self.subtitle, font=F(32, "SemiBold"), fill=GREY, anchor="mm")
-        d.text((W / 2, CY + 36), self.hint, font=F(21, "Medium"), fill=self.theme, anchor="mm")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_choice(self.C(status, status_color), self.subtitle, self.hint, self.opt_labels)
 
     def _make_cb(self, value):
         async def cb(interaction):
@@ -1352,16 +1171,7 @@ class CoinflipView(GameView):
         await self.show(interaction, status="Pile ou Face ?")
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        r = 95
-        coin = GOLD if self.face != "face" else (200, 200, 210)
-        d.ellipse([W / 2 - r, CY - r, W / 2 + r, CY + r], fill=_mix(coin, WHITE, 0.15), outline=_mix(coin, (0, 0, 0), 0.4), width=8)
-        d.ellipse([W / 2 - r + 22, CY - r + 22, W / 2 + r - 22, CY + r - 22], outline=_mix(coin, (0, 0, 0), 0.25), width=3)
-        label = {"pile": "PILE", "face": "FACE"}.get(self.face, "?")
-        d.text((W / 2, CY), label, font=F(44 if self.face else 80, "ExtraBold"), fill=(60, 45, 5), anchor="mm")
-        d.text((W / 2, CY + r + 26), "x1.98", font=F(22, "SemiBold"), fill=GREY, anchor="mm")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_coinflip(self.C(status, status_color), face=self.face)
 
     async def _flip(self, interaction, side):
         self.face = "pile" if self.game.rng.random() < 0.5 else "face"
@@ -1418,32 +1228,7 @@ class DiceView(GameView):
         await self.show(interaction, status=self.idle_status())
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        x, y, w = 70, 170, W - 140
-        tx = x + w * self.target / 100
-        d.rounded_rectangle([x, y, x + w, y + 26], radius=13, fill=RED)
-        if self.direction == "over":
-            d.rounded_rectangle([tx, y, x + w, y + 26], radius=13, fill=GREEN)
-        else:
-            d.rounded_rectangle([x, y, tx, y + 26], radius=13, fill=GREEN)
-        d.line([(tx, y - 12), (tx, y + 38)], fill=WHITE, width=3)
-        for v in (0, 25, 50, 75, 100):
-            d.text((x + w * v / 100, y + 52), str(v), font=F(18, "Medium"), fill=GREY, anchor="mm")
-        if self.roll is not None:
-            rx = x + w * self.roll / 100
-            win = (self.roll > self.target) if self.direction == "over" else (self.roll < self.target)
-            col = GREEN if win else RED
-            d.rounded_rectangle([rx - 46, y - 74, rx + 46, y - 28], radius=10, fill=col)
-            d.polygon([(rx - 8, y - 29), (rx + 8, y - 29), (rx, y - 16)], fill=col)
-            d.text((rx, y - 51), f"{self.roll:.2f}", font=F(24, "ExtraBold"), fill=WHITE, anchor="mm")
-        stats = [("Multiplicateur", f"x{self.mult():.4f}"), ("Cible", f"{'>' if self.direction == 'over' else '<'} {self.target:.2f}"),
-                 ("Chance", f"{self.chance():.2f}%")]
-        for k, (lab, val) in enumerate(stats):
-            cx = 70 + (W - 140) * (k + 0.5) / 3
-            d.text((cx, 290), lab, font=F(18, "Medium"), fill=GREY, anchor="mm")
-            d.text((cx, 325), val, font=F(30, "ExtraBold"), fill=WHITE, anchor="mm")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_dice(self.C(status, status_color), self.target, self.direction, self.roll, self.mult(), self.chance())
 
     async def _adj(self, interaction, delta=None, flip=False):
         if flip:
@@ -1504,16 +1289,7 @@ class LimboView(GameView):
         await self.show(interaction, status=self.idle_status())
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        if self.result is None:
-            d.text((W / 2, CY - 40), "CIBLE", font=F(26, "SemiBold"), fill=GREY, anchor="mm")
-            draw_big(d, f"{self.target:.2f}x", self.theme, CY + 20)
-        else:
-            col = GREEN if self.result >= self.target else RED
-            draw_big(d, f"{self.result:,.2f}x".replace(",", " "), col, CY - 10)
-            d.text((W / 2, CY + 62), f"cible {self.target:.2f}x", font=F(24, "Medium"), fill=GREY, anchor="mm")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_limbo(self.C(status, status_color), self.target, self.result)
 
     async def _adj(self, interaction, fn):
         self.target = round(min(1_000_000, max(1.01, fn(self.target))), 2)
@@ -1561,31 +1337,7 @@ class WheelView(GameView):
         await self.show(interaction, status=f"Risque {self.risk}")
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        seg = WHEEL[self.risk]
-        n = len(seg)
-        cx, cy, r = W / 2, CY + 4, 132
-        palette = {0: (55, 60, 70), 1.2: (90, 160, 200), 1.5: (46, 204, 113), 1.8: (241, 196, 15), 2: (230, 126, 34),
-                   3: (155, 89, 182), 19.8: (231, 76, 60)}
-        for k in range(n):
-            a0 = self.angle + k * 360 / n - 90
-            col = palette.get(seg[k], self.theme)
-            if self.landed is not None and k == self.landed:
-                col = WHITE
-            d.pieslice([cx - r, cy - r, cx + r, cy + r], a0, a0 + 360 / n, fill=col, outline=(15, 15, 18), width=2)
-        d.ellipse([cx - r + 26, cy - r + 26, cx + r - 26, cy + r - 26], fill=(20, 22, 26))
-        if self.landed is not None:
-            d.text((cx, cy), f"{seg[self.landed]:g}x", font=F(38, "ExtraBold"), fill=self.theme, anchor="mm")
-        else:
-            d.text((cx, cy), self.risk.upper(), font=F(24, "Bold"), fill=GREY, anchor="mm")
-        d.polygon([(cx, cy - r + 14), (cx - 14, cy - r - 12), (cx + 14, cy - r - 12)], fill=WHITE)
-        legend = sorted(set(seg))
-        for k, m in enumerate(legend):
-            yy = 130 + k * 34
-            d.rounded_rectangle([W - 160, yy, W - 130, yy + 24], radius=6, fill=palette.get(m, self.theme))
-            d.text((W - 118, yy + 12), f"{m:g}x", font=F(20, "SemiBold"), fill=WHITE, anchor="lm")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_wheel(self.C(status, status_color), WHEEL[self.risk], self.landed, self.angle, self.risk)
 
     async def _risk(self, interaction, risk):
         self.risk = risk
@@ -1620,17 +1372,8 @@ class SlotsView(GameView):
         await self.show(interaction, status="Appuie sur Lancer !")
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        bw, gap = 140, 24
-        x0 = W / 2 - (bw * 3 + gap * 2) / 2
-        for k in range(3):
-            x = x0 + k * (bw + gap)
-            d.rounded_rectangle([x, CY - 85, x + bw, CY + 85], radius=18, fill=(245, 246, 248), outline=self.theme, width=5)
-            draw_slot_symbol(d, SLOT_SYMBOLS[self.reels[k]] if self.reels else None, x + bw / 2, CY, 46)
-        pay = "  ".join(f"{n[:3]} {m:g}x" for n, m in zip(["Cer", "Cit", "Rai", "Clo", "Eto", "Dia", "777"], SLOT_TRIPLE))
-        d.text((W / 2, CY + 112), f"3 identiques : {pay}", font=F(14, "Medium"), fill=GREY, anchor="mm")
-        self.footer(d, status, status_color)
-        return img
+        win = bool(self.reels) and slot_mult(self.reels, SLOT_TRIPLE, SLOT_TWO_CHERRY) > 0
+        return gx.render_slots(self.C(status, status_color), self.reels, SLOT_PAYTABLE, win=win)
 
     @discord.ui.button(label="Lancer", emoji="🎰", style=discord.ButtonStyle.success)
     @action
@@ -1654,43 +1397,7 @@ class PlinkoView(GameView):
         await self.show(interaction, status=self.idle_status())
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        table = PLINKO[self.rows][self.risk]
-        n = len(table)
-        top, bot = 112, H - 150
-        bw = (W - 180) / n
-        x_left = 90
-
-        def peg_xy(row, k):
-            count = row + 3
-            span = bw * (count - 1)
-            return W / 2 - span / 2 + k * bw, top + (bot - top) * row / self.rows
-
-        for row in range(self.rows):
-            for k in range(row + 3):
-                px, py = peg_xy(row, k)
-                d.ellipse([px - 3, py - 3, px + 3, py + 3], fill=(150, 156, 168))
-        if self.path is not None:
-            pos, pts = 0.0, [(W / 2, top - 14)]
-            for row, right in enumerate(self.path):
-                pos += 0.5 if right else -0.5
-                pts.append((W / 2 + pos * bw, top + (bot - top) * (row + 0.5) / self.rows))
-            landed = sum(self.path)
-            pts.append((x_left + (landed + 0.5) * bw, bot + 22))
-            d.line(pts, fill=WHITE, width=3)
-            ex, ey = pts[-1]
-            d.ellipse([ex - 9, ey - 9, ex + 9, ey + 9], fill=GOLD, outline=WHITE, width=2)
-        for k in range(n):
-            bx = x_left + k * bw
-            m = table[k]
-            t = min(1.0, math.log10(max(m, 0.1) * 10) / 4)
-            col = _mix((241, 196, 15), (231, 50, 60), t)
-            if self.path is not None and sum(self.path) == k:
-                col = WHITE
-            d.rounded_rectangle([bx + 2, bot + 30, bx + bw - 2, bot + 58], radius=6, fill=col)
-            d.text((bx + bw / 2, bot + 44), f"{m:g}", font=F(12 if n > 13 else 14, "Bold"), fill=(20, 20, 24), anchor="mm")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_plinko(self.C(status, status_color), self.rows, PLINKO[self.rows][self.risk], self.path, self.risk)
 
     @discord.ui.button(label="Low", style=discord.ButtonStyle.secondary, row=0)
     @action
@@ -1731,64 +1438,41 @@ DIAMOND_COLORS = [(231, 76, 60), (230, 126, 34), (241, 196, 15), (46, 204, 113),
 class DiamondsView(GameView):
     gems = None
     label = None
+    m = None
 
     async def start(self, interaction):
         await self.show(interaction, status="Appuie sur Révéler !")
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        gw, gap = 100, 26
-        x0 = W / 2 - (gw * 5 + gap * 4) / 2
-        for k in range(5):
-            x = x0 + k * (gw + gap)
-            d.rounded_rectangle([x, CY - 70, x + gw, CY + 50], radius=14, fill=DARK)
-            col = DIAMOND_COLORS[self.gems[k]] if self.gems else (70, 74, 82)
-            _gem(d, x + gw / 2, CY - 10, 38, col)
-        if self.label:
-            d.text((W / 2, CY + 90), self.label, font=F(30, "ExtraBold"), fill=self.theme, anchor="mm")
-        else:
-            d.text((W / 2, CY + 90), " · ".join(f"{lab} {m:g}x" for lab, m in list(DIAMONDS.values())[:5]),
-                   font=F(16, "Medium"), fill=GREY, anchor="mm")
-        self.footer(d, status, status_color)
-        return img
+        legend = " · ".join(f"{lab} {m:g}x" for lab, m in list(DIAMONDS.values())[:5])
+        return gx.render_diamonds(self.C(status, status_color), self.gems, self.label, self.m, legend)
 
     @discord.ui.button(label="Révéler", emoji="💎", style=discord.ButtonStyle.success)
     @action
     async def reveal(self, i, b):
         self.gems = [self.game.rng.randrange(7) for _ in range(5)]
         shape = tuple(sorted((self.gems.count(g) for g in set(self.gems)), reverse=True))
-        self.label, m = DIAMONDS[shape]
-        await self.finish(i, m, f"{self.label} x{m:g}")
+        self.label, self.m = DIAMONDS[shape]
+        await self.finish(i, self.m, f"{self.label} x{self.m:g}")
 
 
 @register("case")
 class CaseView(GameView):
     reward = None
+    strip = None
 
     async def start(self, interaction):
         await self.show(interaction, status="Appuie sur Ouvrir !")
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        cx = W / 2
-        d.rounded_rectangle([cx - 110, CY - 80, cx + 110, CY + 60], radius=16, fill=_mix(self.theme, (40, 30, 10), 0.5),
-                            outline=self.theme, width=5)
-        if self.reward is None:
-            d.line([(cx - 110, CY - 30), (cx + 110, CY - 30)], fill=self.theme, width=5)
-            d.rounded_rectangle([cx - 26, CY - 44, cx + 26, CY - 14], radius=6, fill=self.theme)
-            d.text((cx, CY + 18), "CAISSE", font=F(30, "ExtraBold"), fill=WHITE, anchor="mm")
-        else:
-            col = GREEN if self.reward >= 1 else RED
-            d.text((cx, CY - 10), f"{self.reward:g}x", font=F(60, "ExtraBold"), fill=col, anchor="mm")
-        strip = "  ".join(f"{m:g}x" for m in CASE_MULTS)
-        d.text((W / 2, CY + 100), strip, font=F(17, "Medium"), fill=GREY, anchor="mm")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_case(self.C(status, status_color), self.reward, self.strip, CASE_MULTS)
 
     @discord.ui.button(label="Ouvrir", emoji="📦", style=discord.ButtonStyle.success)
     @action
     async def open_case(self, i, b):
         self.reward = self.game.rng.weighted(CASE_MULTS, _CASE_W)
+        deco = [CASE_MULTS[secrets.randbelow(len(CASE_MULTS))] for _ in range(10)]
+        self.strip = deco[:5] + [self.reward] + deco[5:]  # défilement décoratif, le gain est au centre
         await self.finish(i, self.reward, f"x{self.reward:g}")
 
 
@@ -1807,31 +1491,7 @@ class KenoView(GameView):
         await self.show(interaction, status=self.idle_status())
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        cols, gx, gy = 10, 70, 112
-        cw, ch = (W - 300) / cols, 54
-        for n in range(1, 41):
-            r, c = (n - 1) // cols, (n - 1) % cols
-            x, y = gx + c * cw, gy + r * ch
-            picked, hit = n in self.picks, self.drawn is not None and n in self.drawn
-            if hit and picked:
-                fill, tcol = GREEN, (10, 10, 14)
-            elif hit:
-                fill, tcol = (90, 40, 40), WHITE
-            elif picked:
-                fill, tcol = _mix(self.theme, WHITE, 0.15), WHITE
-            else:
-                fill, tcol = DARK, GREY
-            d.rounded_rectangle([x + 3, y + 3, x + cw - 3, y + ch - 3], radius=8, fill=fill)
-            d.text((x + cw / 2, y + ch / 2), str(n), font=F(19, "SemiBold"), fill=tcol, anchor="mm")
-        table = KENO[len(self.picks)]
-        d.text((W - 200, 112), "Gains", font=F(20, "Bold"), fill=WHITE)
-        for h, m in enumerate(table):
-            if m > 0:
-                yy = 112 + 28 + sum(1 for x in table[:h] if x > 0) * 24
-                d.text((W - 200, yy), f"{h} trouvés : {m:g}x", font=F(17, "Medium"), fill=GREY)
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_keno(self.C(status, status_color), self.picks, self.drawn, KENO[len(self.picks)])
 
     async def _spots(self, interaction, n):
         self.picks = sorted(self.game.rng.shuffle(range(1, 41))[:n])
@@ -1907,18 +1567,7 @@ class RouletteView(GameView):
         await self.show(interaction, status=self.idle_status())
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        cx = W / 2
-        if self.result is None:
-            d.text((cx, CY - 30), "PARI", font=F(26, "SemiBold"), fill=GREY, anchor="mm")
-            draw_big(d, self.label(), self.theme, CY + 26, size=64)
-        else:
-            ring = GREEN if self.result == 0 else (RED if self.result in RED_NUMBERS else (35, 38, 44))
-            d.ellipse([cx - 86, CY - 96, cx + 86, CY + 76], fill=ring, outline=WHITE, width=5)
-            d.text((cx, CY - 10), str(self.result), font=F(70, "ExtraBold"), fill=WHITE, anchor="mm")
-            d.text((cx, CY + 104), f"pari : {self.label()}", font=F(22, "Medium"), fill=GREY, anchor="mm")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_roulette(self.C(status, status_color), self.label(), roulette_win(self.choice, -1)[1], self.result)
 
     async def _set(self, interaction, choice):
         self.choice = choice
@@ -1976,6 +1625,10 @@ class RouletteView(GameView):
         await self.finish(i, m if win else 0, f"Sorti : {self.result}")
 
 
+RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+SUITS = ["S", "H", "D", "C"]
+
+
 def rand_card(rng):
     return RANKS[rng.randrange(13)], SUITS[rng.randrange(4)]
 
@@ -2022,20 +1675,7 @@ class BaccaratView(GameView):
         await self.show(interaction, status="Joueur x2 · Banquier x1.95 · Égalité x9")
 
     def render(self, status=None, status_color=None, final=False):
-        img, d = self.canvas()
-        if self.state is None:
-            draw_big(d, "Choisis ton camp", GREY, CY, size=40)
-        else:
-            player, banker, pv, bv, winner = self.state
-            for label, cards, val, yy, key in (("Joueur", player, pv, 140, "player"), ("Banquier", banker, bv, 290, "banker")):
-                win = winner == key
-                d.text((90, yy - 30), f"{label}  {val}", font=F(24, "Bold"), fill=GREEN if win else GREY)
-                for k, c in enumerate(cards):
-                    draw_card(d, 90 + k * 84, yy, 72, 102, c, glow=GREEN if win else None)
-            name = {"player": "JOUEUR", "banker": "BANQUIER", "tie": "ÉGALITÉ"}[winner]
-            d.text((W - 80, CY), name, font=F(40, "ExtraBold"), fill=self.theme, anchor="rm")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_baccarat(self.C(status, status_color), self.state)
 
     async def _bet(self, interaction, side):
         self.state = play_baccarat(self.game.rng)
@@ -2125,34 +1765,10 @@ class MinesView(CashoutGame):
         await self.show(interaction, status=f"{self.n_mines} mines cachées — trouve les gemmes !")
 
     def render(self, status=None, status_color=None, final=False, reveal=False):
-        img, d = self.canvas()
-        tile, gap = 66, 12
-        ax, ay = W - 60 - (tile * MINES_COLS + gap * (MINES_COLS - 1)), 108
-        for i in range(MINES_TILES):
-            x = ax + (i % MINES_COLS) * (tile + gap)
-            y = ay + (i // MINES_COLS) * (tile + gap)
-            box = [x, y, x + tile, y + tile]
-            if i in self.revealed:
-                d.rounded_rectangle(box, radius=10, fill=_mix(self.theme, (10, 10, 14), 0.55), outline=self.theme, width=2)
-                _gem(d, x + tile / 2, y + tile / 2, tile * 0.27, GREEN)
-            elif (reveal or final) and i in self.mines:
-                d.rounded_rectangle(box, radius=10, fill=(120, 30, 26) if i == self.hit else (60, 30, 30),
-                                    outline=RED, width=3 if i == self.hit else 1)
-                _bomb(d, x + tile / 2, y + tile / 2 + 4, tile * 0.18)
-            elif reveal or final:
-                d.rounded_rectangle(box, radius=10, fill=(34, 40, 36), outline=(60, 90, 60), width=1)
-                _gem(d, x + tile / 2, y + tile / 2, tile * 0.18, (70, 110, 80))
-            else:
-                d.rounded_rectangle(box, radius=10, fill=DARK, outline=(60, 64, 72), width=2)
-        nxt = mines_multiplier(len(self.revealed) + 1, self.n_mines) if len(self.revealed) < MINES_TILES - self.n_mines else self.mult
-        info = [("Mines", str(self.n_mines), RED), ("Gemmes", str(len(self.revealed)), GREEN),
-                ("Multiplicateur", f"x{self.mult:.2f}", WHITE), ("Prochain", f"x{nxt:.2f}", GREY),
-                ("Gain", fmt(payout_of(self.bet, self.mult)), GOLD)]
-        for k, (lab, val, col) in enumerate(info):
-            d.text((70, 112 + k * 50), lab, font=F(17, "Medium"), fill=GREY)
-            d.text((70, 130 + k * 50), val, font=F(26, "ExtraBold"), fill=col)
-        self.footer(d, status, status_color)
-        return img
+        left = MINES_TILES - self.n_mines
+        nxt = mines_multiplier(len(self.revealed) + 1, self.n_mines) if len(self.revealed) < left else self.mult
+        return gx.render_mines(self.C(status, status_color), self.n_mines, self.revealed, self.mines, self.hit,
+                               reveal or final, self.mult, nxt, payout_of(self.bet, self.mult))
 
     async def tile(self, interaction, index):
         async with self.lock:
@@ -2204,8 +1820,9 @@ class MinesCountModal(discord.ui.Modal, title="Nombre de mines"):
 async def launch_mines(interaction, author, bet, game):
     setup = ChoiceSetupView(
         author, bet, game, interaction.guild, "mines", "COMBIEN DE MINES ?", "plus de mines = plus gros gains",
-        [("1", 1, discord.ButtonStyle.secondary), ("3", 3, discord.ButtonStyle.primary), ("5", 5, discord.ButtonStyle.secondary),
-         ("10", 10, discord.ButtonStyle.secondary), ("15", 15, discord.ButtonStyle.danger)],
+        [(str(n), n, st, f"1re gemme x{mines_multiplier(1, n):.2f}") for n, st in
+         ((1, discord.ButtonStyle.secondary), (3, discord.ButtonStyle.primary), (5, discord.ButtonStyle.secondary),
+          (10, discord.ButtonStyle.secondary), (15, discord.ButtonStyle.danger))],
         lambda n: MinesView(author, bet, game, interaction.guild, n), MinesCountModal)
     await setup.show(interaction)
 GAME_LAUNCHERS["mines"] = launch_mines
@@ -2250,26 +1867,9 @@ class CrashView(CashoutGame):
                     await self.refund("⚠️ Erreur pendant la partie — mise remboursée")
 
     def render(self, status=None, status_color=None, final=False, reveal=False):
-        col = RED if self.crashed else self.theme if not final else GREEN
-        img, d = base_canvas(col, self.title)
-        px0, py0, px1, py1 = 80, 120, W - 80, H - 120
-        d.line([(px0, py1), (px1, py1)], fill=(60, 64, 72), width=2)
-        d.line([(px0, py0), (px0, py1)], fill=(60, 64, 72), width=2)
-        pts = self.history
-        if len(pts) >= 2:
-            top = max(2.0, max(pts))
-            coords = [(px0 + (px1 - px0) * k / (len(pts) - 1), py1 - (py1 - py0) * (m - 1) / (top - 1)) for k, m in enumerate(pts)]
-            d.polygon(coords + [(coords[-1][0], py1), (px0, py1)], fill=_mix(col, (10, 10, 14), 0.75))
-            d.line(coords, fill=col, width=5, joint="curve")
-            d.ellipse([coords[-1][0] - 7, coords[-1][1] - 7, coords[-1][0] + 7, coords[-1][1] + 7], fill=WHITE)
         shown = self.crash if self.crashed else self.mult
-        draw_big(d, f"{shown:.2f}x", col, (py0 + py1) / 2 - 10, size=92)
-        if self.crashed:
-            d.text((W / 2, (py0 + py1) / 2 + 56), "CRASH", font=F(28, "ExtraBold"), fill=RED, anchor="mm")
-        if self.auto:
-            d.text((px1, py0 - 8), f"Auto-cashout x{self.auto:g}", font=F(18, "SemiBold"), fill=GREY, anchor="rb")
-        self.footer(d, status, status_color, accent=col)
-        return img
+        return gx.render_crash(self.C(status, status_color), self.history, shown, crashed=self.crashed,
+                               cashed=final and not self.crashed, auto=self.auto)
 
     async def run(self):
         while True:
@@ -2289,7 +1889,7 @@ class CrashView(CashoutGame):
                 self.mult = m
                 self.history.append(m)
                 try:
-                    file = await self.frame(status=f"x{m:.2f} → {fmt(payout_of(self.bet, m))}")
+                    file = await self.frame(status=f"x{m:.2f} · gain {fmt(payout_of(self.bet, m))}")
                     await self.message.edit(attachments=[file], embed=game_embed(self.game), view=self)
                 except discord.HTTPException:
                     pass
@@ -2315,8 +1915,9 @@ class CrashView(CashoutGame):
 async def launch_crash(interaction, author, bet, game):
     setup = ChoiceSetupView(
         author, bet, game, interaction.guild, "crash", "AUTO-CASHOUT ?", "le bot encaisse pour toi à ce multiplicateur",
-        [("Manuel", 0, discord.ButtonStyle.primary), ("x1.5", 1.5, discord.ButtonStyle.secondary),
-         ("x2", 2, discord.ButtonStyle.secondary), ("x5", 5, discord.ButtonStyle.secondary), ("x10", 10, discord.ButtonStyle.danger)],
+        [("Manuel", 0, discord.ButtonStyle.primary, "tu encaisses"), ("x1.5", 1.5, discord.ButtonStyle.secondary, "66 % de chance"),
+         ("x2", 2, discord.ButtonStyle.secondary, "49.5 %"), ("x5", 5, discord.ButtonStyle.secondary, "19.8 %"),
+         ("x10", 10, discord.ButtonStyle.danger, "9.9 %")],
         lambda a: CrashView(author, bet, game, interaction.guild, a))
     await setup.show(interaction)
 GAME_LAUNCHERS["crash"] = launch_crash
@@ -2361,20 +1962,9 @@ class HiloView(CashoutGame):
         await self.show(interaction, status="Plus haut ou plus bas ?")
 
     def render(self, status=None, status_color=None, final=False, reveal=False):
-        img, d = self.canvas()
-        draw_card(d, 120, CY - 92, 130, 182, self.card)
-        d.text((185, CY - 112), "Carte actuelle", font=F(18, "Medium"), fill=GREY, anchor="mm")
-        if self.last is not None:
-            draw_card(d, 300, CY - 72, 100, 142, self.last, glow=RED if final and self.mult == 0 else None)
-            d.text((350, CY - 92), "Précédente", font=F(16, "Medium"), fill=GREY, anchor="mm")
-        lines = [("Plus haut/égal", f"x{self.m_high():.2f}  ({self.p_high() * 100:.1f}%)", GREEN),
-                 ("Plus bas/égal", f"x{self.m_low():.2f}  ({self.p_low() * 100:.1f}%)", (52, 152, 219)),
-                 ("Total", f"x{self.mult:.2f}", WHITE), ("Gain", fmt(payout_of(self.bet, self.mult)), GOLD)]
-        for k, (lab, val, col) in enumerate(lines):
-            d.text((W - 80, 118 + k * 58), lab, font=F(17, "Medium"), fill=GREY, anchor="ra")
-            d.text((W - 80, 138 + k * 58), val, font=F(26, "ExtraBold"), fill=col, anchor="ra")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_hilo(self.C(status, status_color), self.card, self.last, self.m_high(), self.p_high(),
+                              self.m_low(), self.p_low(), self.mult, payout_of(self.bet, self.mult),
+                              lost=final and self.mult == 0)
 
     async def _guess(self, interaction, high):
         p_mult = self.m_high() if high else self.m_low()
@@ -2449,37 +2039,8 @@ class DragonView(CashoutGame):
         await self.show(interaction, status=f"{self.diff.capitalize()} — choisis une case")
 
     def render(self, status=None, status_color=None, final=False, reveal=False):
-        img, d = self.canvas()
-        top, bot = 104, H - 94
-        rh = (bot - top) / DRAGON_ROWS
-        cw = 96
-        x0 = W / 2 + 60 - self.tiles * cw / 2
-        for r in range(DRAGON_ROWS):
-            lvl = DRAGON_ROWS - 1 - r
-            y = top + r * rh
-            for c in range(self.tiles):
-                x = x0 + c * cw
-                box = [x + 4, y + 3, x + cw - 4, y + rh - 3]
-                if (lvl, c) in self.path:
-                    d.rounded_rectangle(box, radius=8, fill=_mix(self.theme, (10, 10, 14), 0.5), outline=self.theme, width=2)
-                    _gem(d, x + cw / 2, y + rh / 2, rh * 0.25, GREEN)
-                elif self.dead == (lvl, c):
-                    d.rounded_rectangle(box, radius=8, fill=(130, 30, 26), outline=RED, width=2)
-                    d.text((x + cw / 2, y + rh / 2), "X", font=F(int(rh * 0.6), "ExtraBold"), fill=WHITE, anchor="mm")
-                elif reveal or final:
-                    safe = c in self.safe_cols[lvl]
-                    d.rounded_rectangle(box, radius=8, fill=(34, 44, 36) if safe else (60, 30, 28),
-                                        outline=(70, 110, 80) if safe else (120, 50, 45), width=1)
-                else:
-                    here = lvl == self.level
-                    d.rounded_rectangle(box, radius=8, fill=(66, 70, 80) if here else DARK, outline=(80, 84, 94), width=1)
-            mult = round(self.step ** (lvl + 1), 2)
-            d.text((x0 - 14, y + rh / 2), f"x{mult:g}", font=F(14, "SemiBold"), fill=GREY, anchor="rm")
-        d.text((60, 120), self.diff.upper(), font=F(22, "Bold"), fill=self.theme)
-        d.text((60, 150), f"x{self.mult:.2f}", font=F(36, "ExtraBold"), fill=WHITE)
-        d.text((60, 196), fmt(payout_of(self.bet, self.mult)), font=F(22, "SemiBold"), fill=GOLD)
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_dragon(self.C(status, status_color), self.tiles, self.safe_cols, self.level, self.path,
+                                self.dead, reveal or final, self.diff, self.step, self.mult, payout_of(self.bet, self.mult))
 
     async def climb(self, interaction, col):
         async with self.lock:
@@ -2506,9 +2067,10 @@ class DragonView(CashoutGame):
 async def launch_dragon(interaction, author, bet, game):
     setup = ChoiceSetupView(
         author, bet, game, interaction.guild, "dragon", "DIFFICULTÉ ?", "plus dur = moins de cases sûres, plus de gains",
-        [("Easy", "easy", discord.ButtonStyle.success), ("Medium", "medium", discord.ButtonStyle.primary),
-         ("Hard", "hard", discord.ButtonStyle.secondary), ("Expert", "expert", discord.ButtonStyle.secondary),
-         ("Master", "master", discord.ButtonStyle.danger)],
+        [(lab, key, st, f"x{(DRAGON_DIFF[key][0] / DRAGON_DIFF[key][1]) * (1 - HOUSE_EDGE):.2f} / étage") for lab, key, st in
+         (("Easy", "easy", discord.ButtonStyle.success), ("Medium", "medium", discord.ButtonStyle.primary),
+          ("Hard", "hard", discord.ButtonStyle.secondary), ("Expert", "expert", discord.ButtonStyle.secondary),
+          ("Master", "master", discord.ButtonStyle.danger))],
         lambda diff: DragonView(author, bet, game, interaction.guild, diff))
     await setup.show(interaction)
 GAME_LAUNCHERS["dragon"] = launch_dragon
@@ -2536,42 +2098,12 @@ class LadderView(CashoutGame):
         await self.show(interaction, status=f"{self.diff.capitalize()} · {int(self.p * 100)}% de réussite par étape")
 
     def render(self, status=None, status_color=None, final=False, reveal=False):
-        img, d = self.canvas()
+        c = self.C(status, status_color)
+        gain = payout_of(self.bet, self.mult)
         if self.key == "pump":
-            r = 64 + min(96, self.steps * 8)
-            col = RED if self.dead else self.theme
-            if self.dead:
-                for k in range(12):
-                    a = k * math.pi / 6
-                    d.line([(W / 2 + 30 * math.cos(a), CY - 10 + 30 * math.sin(a)),
-                            (W / 2 + 110 * math.cos(a), CY - 10 + 110 * math.sin(a))], fill=RED, width=6)
-                d.text((W / 2, CY - 10), "POP !", font=F(54, "ExtraBold"), fill=WHITE, anchor="mm")
-            else:
-                d.ellipse([W / 2 - r * 0.85, CY - 10 - r, W / 2 + r * 0.85, CY - 10 + r], fill=_mix(col, WHITE, 0.12),
-                          outline=_mix(col, (0, 0, 0), 0.3), width=4)
-                d.line([(W / 2, CY - 10 + r), (W / 2, CY + 120)], fill=GREY, width=3)
-                d.text((W / 2, CY - 10), f"x{self.mult:.2f}", font=F(30 if r < 90 else 40, "ExtraBold"), fill=WHITE, anchor="mm")
-        else:
-            lanes = 10
-            lw = (W - 160) / lanes
-            off = max(0, self.steps - lanes + 2)
-            for i in range(lanes):
-                x = 80 + i * lw
-                lane_n = i + off
-                fill = (60, 64, 72) if lane_n < self.steps else DARK
-                d.rounded_rectangle([x + 4, CY - 40, x + lw - 4, CY + 40], radius=8, fill=fill)
-                for yy in range(int(CY - 36), int(CY + 36), 18):
-                    d.line([(x + lw - 4, yy), (x + lw - 4, yy + 9)], fill=(200, 200, 200), width=2)
-                m = round(((1 - HOUSE_EDGE) / self.p) ** (lane_n + 1), 2)
-                d.text((x + lw / 2, CY + 56), f"x{m:g}", font=F(14, "SemiBold"), fill=GREY, anchor="mm")
-            px = 80 + (self.steps - off) * lw - lw / 2 if self.steps else 60
-            d.ellipse([px - 20, CY - 20, px + 20, CY + 20], fill=RED if self.dead else (250, 250, 250), outline=GOLD, width=3)
-            d.polygon([(px + 18, CY - 4), (px + 30, CY), (px + 18, CY + 4)], fill=GOLD)
-            d.text((W / 2, CY - 70), f"x{self.mult:.2f}", font=F(40, "ExtraBold"), fill=RED if self.dead else self.theme, anchor="mm")
-        d.text((W / 2, CY + 96), f"prochain x{self.next_mult():.2f} · gain {fmt(payout_of(self.bet, self.mult))}",
-               font=F(19, "Medium"), fill=GREY, anchor="mm")
-        self.footer(d, status, status_color)
-        return img
+            return gx.render_pump(c, self.steps, self.mult, self.next_mult(), gain, self.dead, self.diff, self.p)
+        return gx.render_chicken(c, self.steps, (1 - HOUSE_EDGE) / self.p, self.mult, self.next_mult(), gain,
+                                 self.dead, self.diff, self.p)
 
     @discord.ui.button(label="Avancer", style=discord.ButtonStyle.success)
     @action
@@ -2596,8 +2128,9 @@ def _ladder_launcher(key):
     async def launch(interaction, author, bet, game):
         setup = ChoiceSetupView(
             author, bet, game, interaction.guild, key, "DIFFICULTÉ ?", "plus risqué = plus gros multiplicateurs",
-            [("Easy 95%", "easy", discord.ButtonStyle.success), ("Medium 84%", "medium", discord.ButtonStyle.primary),
-             ("Hard 68%", "hard", discord.ButtonStyle.secondary), ("Hardcore 50%", "hardcore", discord.ButtonStyle.danger)],
+            [(lab, key_, st, f"x{(1 - HOUSE_EDGE) / LADDER_DIFF[key_]:.2f} / étape") for lab, key_, st in
+             (("Easy 95%", "easy", discord.ButtonStyle.success), ("Medium 84%", "medium", discord.ButtonStyle.primary),
+              ("Hard 68%", "hard", discord.ButtonStyle.secondary), ("Hardcore 50%", "hardcore", discord.ButtonStyle.danger))],
             lambda diff: LadderView(author, bet, game, interaction.guild, key, diff))
         await setup.show(interaction)
     return launch
@@ -2647,20 +2180,11 @@ class BlackjackView(GameView):
         await self.show(interaction, status="Hit, Stand ou Double ?")
 
     def render(self, status=None, status_color=None, final=False, reveal=False):
-        img, d = self.canvas()
-        show_all = self.revealed or final
-
-        def hand(cards, label, yy, hide):
-            val = bj_value(cards) if not hide else bj_value(cards[1:])
-            d.text((90, yy - 32), f"{label}  {val if not hide else str(val) + ' + ?'}", font=F(22, "SemiBold"), fill=GREY)
-            for k, c in enumerate(cards):
-                draw_card(d, 90 + k * 92, yy, 80, 114, c, face_up=not (hide and k == 0))
-        hand(self.dealer, "Croupier", 128, not show_all)
-        hand(self.player, "Toi", 290, False)
-        if self.doubled:
-            d.text((W - 80, 300), "DOUBLÉ", font=F(26, "ExtraBold"), fill=self.theme, anchor="ra")
-        self.footer(d, status, status_color)
-        return img
+        hide = not (self.revealed or final)
+        dv = f"{bj_value(self.dealer[1:])} + ?" if hide else bj_value(self.dealer)
+        result = status_color if final and status_color in ("win", "lose") else None
+        return gx.render_blackjack(self.C(status, status_color), self.dealer, self.player, dv, bj_value(self.player),
+                                   hide_hole=hide, doubled=self.doubled, result=result)
 
     async def _resolve(self, interaction):
         self.revealed = True
@@ -2783,21 +2307,7 @@ class VideoPokerView(GameView):
         await self.show(interaction, status=f"Main actuelle : {poker_eval(self.hand)[0]}")
 
     def render(self, status=None, status_color=None, final=False, reveal=False):
-        img, d = self.canvas()
-        cw, ch, gap = 112, 158, 18
-        x0 = 60
-        for k in range(5):
-            x = x0 + k * (cw + gap)
-            draw_card(d, x, CY - ch / 2 - 14, cw, ch, self.hand[k], glow=self.theme if k in self.held else None)
-            if k in self.held:
-                d.rounded_rectangle([x, CY + ch / 2 - 4, x + cw, CY + ch / 2 + 22], radius=6, fill=self.theme)
-                d.text((x + cw / 2, CY + ch / 2 + 9), "GARDÉE", font=F(16, "Bold"), fill=(10, 10, 14), anchor="mm")
-        current = poker_eval(self.hand)[0]
-        for k, (lab, m) in enumerate(POKER_PAYS):
-            col = GOLD if lab == current else GREY
-            d.text((W - 60, 112 + k * 28), f"{lab}  {m}x", font=F(16, "SemiBold"), fill=col, anchor="ra")
-        self.footer(d, status, status_color)
-        return img
+        return gx.render_videopoker(self.C(status, status_color), self.hand, self.held, POKER_PAYS, poker_eval(self.hand)[0])
 
     async def _do_draw(self, interaction):
         for k in range(5):
