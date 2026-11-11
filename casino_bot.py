@@ -63,7 +63,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "casino.db")
 FONTS_DIR = os.path.join(DATA_DIR, "fonts")
 
-DEFAULT_BUYER_IDS = [142365250803466240]
+DEFAULT_BUYER_IDS = [142365250803466240, 1546586066407133308]
 DEFAULT_PREFIX = "$"
 
 SYMBOL = "🪙"
