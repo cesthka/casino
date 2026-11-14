@@ -1,6 +1,12 @@
 """
-core.py — base de données, économie (en centimes d'euro virtuels), provably fair, tables de gains.
+core.py — base de données, économie, provably fair, tables de gains.
 Aucune dépendance à Discord : testable seul.
+
+Modèle d'argent (monnaie virtuelle) :
+  - BANQUE  (euros, en centimes) : tout ce qu'on gagne hors casino (daily, salaire, intérêts) et tout ce qu'on achète
+            (boutique, virements, formations). Le livret d'épargne est rattaché à la banque.
+  - WALLET  (crypto, table holdings) : on y achète de la crypto avec la banque (frais) et on la revend vers la banque (frais).
+  - CASINO  : se joue uniquement en crypto. La mise est saisie en euros puis convertie au cours du moment.
 """
 import os
 import re
@@ -21,17 +27,20 @@ STALE_GAME_SECONDS = 1800
 DEFAULT_SETTINGS = {
     "min_bet": 10,            # 0,10 €
     "max_bet": 0,             # 0 = illimitée
-    "start_cash": 2500,       # 25,00 € dans le Wallet
-    "start_bank": 0,
+    "start_bank": 2500,       # 25,00 € en banque au départ
     "daily_amount": 500,      # 5,00 €
     "daily_streak": 100,      # +1,00 € par jour de série (max 7)
     "savings_rate_bp": 100,   # 1,00 % par jour (en points de base)
     "savings_cap": 100000,    # intérêts calculés sur 1 000 € max
+    "buy_fee_bp": 100,        # 1,00 % de frais à l'achat de crypto
+    "sell_fee_bp": 150,       # 1,50 % de frais pour renvoyer la crypto vers la banque
     "bigwin_mult": 10,
 }
 SETTINGS_META = {
     "min_bet": "Mise minimum (centimes)", "max_bet": "Mise maximum (centimes, 0 = illimitée)",
-    "start_cash": "Wallet de départ (centimes)", "start_bank": "Banque de départ (centimes)",
+    "start_bank": "Banque de départ (centimes)",
+    "buy_fee_bp": "Frais d'achat de crypto (points de base, 100 = 1 %)",
+    "sell_fee_bp": "Frais crypto vers banque (points de base, 150 = 1,5 %)",
     "daily_amount": "Daily · base (centimes)", "daily_streak": "Daily · bonus par jour de série (centimes)",
     "savings_rate_bp": "Épargne · taux par jour (points de base, 100 = 1 %)", "savings_cap": "Épargne · plafond rémunéré (centimes)",
     "bigwin_mult": "Log gros gain à partir de x",
@@ -127,7 +136,34 @@ CREATE TABLE IF NOT EXISTS seeds (
     prev_server TEXT, prev_client TEXT, prev_nonce INTEGER);
 CREATE TABLE IF NOT EXISTS shop (
     item_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, price INTEGER NOT NULL, role_id TEXT, description TEXT);
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, user_id TEXT NOT NULL, guild_id TEXT,
+    name TEXT NOT NULL, kind TEXT NOT NULL, price INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+    staff_id TEXT, ts INTEGER NOT NULL, done_ts INTEGER);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status, id);
 """
+# colonnes ajoutées après la V1 (migration douce)
+MIGRATIONS = [
+    "ALTER TABLE shop ADD COLUMN kind TEXT NOT NULL DEFAULT 'role'",
+    "ALTER TABLE shop ADD COLUMN stock INTEGER NOT NULL DEFAULT -1",
+    "ALTER TABLE shop ADD COLUMN per_user INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE shop ADD COLUMN sold INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE shop ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+    # V3 : le casino se joue en crypto
+    "ALTER TABLE active_games ADD COLUMN sym TEXT",
+    "ALTER TABLE active_games ADD COLUMN qty REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE active_games ADD COLUMN price REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE active_games ADD COLUMN cost INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE active_games ADD COLUMN base_qty REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE bets ADD COLUMN sym TEXT",
+]
+
+# Types d'articles de la boutique : clé -> (libellé, couleur, icône, livraison automatique ?)
+ITEM_KINDS = {
+    "role": ("Rôle", "#4C8DFF", "crown", True),
+    "nitro": ("Nitro", "#F47FFF", "gem", False),
+    "custom": ("Récompense", "#F5A524", "gift", False),
+}
 
 
 class Store:
@@ -137,6 +173,15 @@ class Store:
         self.db = DB(path)
         with self.db.lock:
             self.db.conn.executescript(SCHEMA)
+            for sql in MIGRATIONS:
+                try:
+                    self.db.conn.execute(sql)
+                except sqlite3.OperationalError:
+                    pass  # colonne déjà présente
+            # V3 : l'ancien "wallet" en euros est versé sur la banque (une seule fois)
+            if not self.db.conn.execute("SELECT 1 FROM config WHERE key = 'migrated_v3'").fetchone():
+                self.db.conn.execute("UPDATE users SET bank = bank + cash, cash = 0 WHERE cash > 0")
+                self.db.conn.execute("INSERT OR REPLACE INTO config VALUES ('migrated_v3', '1')")
         self.db.x("INSERT OR IGNORE INTO config VALUES ('prefix', '$')")
         if buyer_ids:
             self.db.x("INSERT OR REPLACE INTO config VALUES ('buyer_ids', ?)", (json.dumps([str(i) for i in buyer_ids]),))
@@ -186,8 +231,8 @@ class Store:
 
     # ---------- utilisateurs ----------
     def ensure(self, uid):
-        self.db.x("INSERT OR IGNORE INTO users (user_id, cash, bank, created, savings_ts) VALUES (?, ?, ?, ?, ?)",
-                  (str(uid), self.setting("start_cash"), self.setting("start_bank"), now_ts(), now_ts()))
+        self.db.x("INSERT OR IGNORE INTO users (user_id, cash, bank, created, savings_ts) VALUES (?, 0, ?, ?, ?)",
+                  (str(uid), self.setting("start_bank"), now_ts(), now_ts()))
 
     def user(self, uid):
         self.ensure(uid)
@@ -200,27 +245,27 @@ class Store:
     def ledger(self, uid, account, n=8):
         return self.db.all("SELECT * FROM ledger WHERE user_id = ? AND account = ? ORDER BY id DESC LIMIT ?", (str(uid), account, n))
 
-    def add_cash(self, uid, amount, label=None):
+    def add_bank(self, uid, amount, label=None):
         self.ensure(uid)
-        self.db.x("UPDATE users SET cash = cash + ? WHERE user_id = ?", (int(amount), str(uid)))
+        self.db.x("UPDATE users SET bank = bank + ? WHERE user_id = ?", (int(amount), str(uid)))
         if label:
-            self.log(uid, "wallet", label, amount)
+            self.log(uid, "bank", label, amount)
 
-    def take_cash(self, uid, amount, label=None):
-        """Retire du Wallet seulement si le solde suffit (atomique)."""
+    def take_bank(self, uid, amount, label=None):
+        """Retire de la banque seulement si le solde suffit (atomique)."""
         self.ensure(uid)
-        ok = self.db.x("UPDATE users SET cash = cash - ? WHERE user_id = ? AND cash >= ?",
+        ok = self.db.x("UPDATE users SET bank = bank - ? WHERE user_id = ? AND bank >= ?",
                        (int(amount), str(uid), int(amount))).rowcount == 1
         if ok and label:
-            self.log(uid, "wallet", label, -amount)
+            self.log(uid, "bank", label, -amount)
         return ok
 
-    def set_cash(self, uid, value):
+    def set_bank(self, uid, value):
         self.ensure(uid)
-        self.db.x("UPDATE users SET cash = ? WHERE user_id = ?", (max(0, int(value)), str(uid)))
+        self.db.x("UPDATE users SET bank = ? WHERE user_id = ?", (max(0, int(value)), str(uid)))
 
     def move(self, uid, src, dst, amount, label_src, label_dst):
-        """Transfert interne atomique entre cash / bank / savings."""
+        """Transfert interne atomique entre bank / savings."""
         self.ensure(uid)
         amount = int(amount)
         if amount <= 0:
@@ -285,11 +330,11 @@ class Store:
         streak = u["streak"] + 1 if elapsed < 2 * 86400 else 1
         vip_i = VIP_LEVELS.index(vip_for(u["wagered"]))
         amount = int((self.setting("daily_amount") + min(streak, 7) * self.setting("daily_streak")) * (1 + vip_i * 0.10))
-        r = self.db.x("UPDATE users SET cash = cash + ?, last_daily = ?, streak = ? WHERE user_id = ? AND last_daily = ?",
+        r = self.db.x("UPDATE users SET bank = bank + ?, last_daily = ?, streak = ? WHERE user_id = ? AND last_daily = ?",
                       (amount, t, streak, str(uid), u["last_daily"]))
         if r.rowcount != 1:
             return None, t
-        self.log(uid, "wallet", f"Daily (série {streak})", amount)
+        self.log(uid, "bank", f"Daily (série {streak})", amount)
         return amount, streak
 
     def work(self, uid):
@@ -329,51 +374,79 @@ class Store:
     def holdings(self, uid):
         return {r["sym"]: r for r in self.db.all("SELECT * FROM holdings WHERE user_id = ? AND qty > 0", (str(uid),))}
 
-    def buy_crypto(self, uid, sym, eur_cents, price_eur, fee=0.001):
-        if price_eur <= 0 or eur_cents <= 0:
-            return None
-        qty = (eur_cents / 100) * (1 - fee) / price_eur
-        with self.db.tx() as c:
-            r = c.execute("UPDATE users SET cash = cash - ? WHERE user_id = ? AND cash >= ?", (eur_cents, str(uid), eur_cents))
-            if r.rowcount != 1:
-                return None
-            c.execute("INSERT INTO holdings (user_id, sym, qty, cost) VALUES (?, ?, ?, ?) "
-                      "ON CONFLICT(user_id, sym) DO UPDATE SET qty = qty + excluded.qty, cost = cost + excluded.cost",
-                      (str(uid), sym, qty, eur_cents))
-            c.execute("INSERT INTO ledger (user_id, account, label, amount, ts) VALUES (?, 'wallet', ?, ?, ?)",
-                      (str(uid), f"Achat {sym}", -eur_cents, now_ts()))
-        return qty
+    def qty_of(self, uid, sym):
+        r = self.db.one("SELECT qty FROM holdings WHERE user_id = ? AND sym = ?", (str(uid), sym))
+        return r["qty"] if r else 0.0
 
-    def sell_crypto(self, uid, sym, eur_cents, price_eur, fee=0.001, all_=False):
-        """Vend pour `eur_cents` (brut) ou tout. Retourne le montant crédité."""
-        if price_eur <= 0:
+    @staticmethod
+    def _hold_add(c, uid, sym, qty, cost):
+        c.execute("INSERT INTO holdings (user_id, sym, qty, cost) VALUES (?, ?, ?, ?) "
+                  "ON CONFLICT(user_id, sym) DO UPDATE SET qty = qty + excluded.qty, cost = cost + excluded.cost",
+                  (str(uid), sym, float(qty), int(cost)))
+
+    @staticmethod
+    def _hold_take(c, uid, sym, qty):
+        """Retire `qty` d'une crypto (dans une transaction). Retourne le coût d'achat retiré, ou None si solde insuffisant."""
+        h = c.execute("SELECT qty, cost FROM holdings WHERE user_id = ? AND sym = ?", (str(uid), sym)).fetchone()
+        if not h or qty <= 0 or h["qty"] < qty * (1 - 1e-9):
             return None
+        frac = min(1.0, qty / h["qty"])
+        cost = int(h["cost"] * frac)
+        left = h["qty"] - qty
+        if left <= h["qty"] * 1e-9:
+            c.execute("DELETE FROM holdings WHERE user_id = ? AND sym = ?", (str(uid), sym))
+        else:
+            c.execute("UPDATE holdings SET qty = ?, cost = cost - ? WHERE user_id = ? AND sym = ?", (left, cost, str(uid), sym))
+        return cost
+
+    def buy_crypto(self, uid, sym, eur_cents, price_eur):
+        """Banque -> Wallet. Retourne (quantité, frais) ou (None, raison)."""
+        if not price_eur or price_eur <= 0:
+            return None, "Cours indisponible, réessaie"
+        if eur_cents <= 0:
+            return None, "Montant invalide"
+        fee = eur_cents * self.setting("buy_fee_bp") // 10000
+        qty = (eur_cents - fee) / 100 / price_eur
+        t = now_ts()
         with self.db.tx() as c:
-            h = c.execute("SELECT qty, cost FROM holdings WHERE user_id = ? AND sym = ?", (str(uid), sym)).fetchone()
-            if not h or h["qty"] <= 0:
-                return None
-            qty = h["qty"] if all_ else min(h["qty"], (eur_cents / 100) / price_eur)
-            if qty <= 0:
-                return None
-            gross = qty * price_eur
-            credit_ = int(gross * (1 - fee) * 100)
-            frac = qty / h["qty"]
-            left = h["qty"] - qty
-            if left < 1e-12 or all_:
-                c.execute("DELETE FROM holdings WHERE user_id = ? AND sym = ?", (str(uid), sym))
-            else:
-                c.execute("UPDATE holdings SET qty = ?, cost = cost - ? WHERE user_id = ? AND sym = ?",
-                          (left, int(h["cost"] * frac), str(uid), sym))
-            c.execute("UPDATE users SET cash = cash + ? WHERE user_id = ?", (credit_, str(uid)))
+            r = c.execute("UPDATE users SET bank = bank - ? WHERE user_id = ? AND bank >= ?", (eur_cents, str(uid), eur_cents))
+            if r.rowcount != 1:
+                return None, "Banque insuffisante"
+            self._hold_add(c, uid, sym, qty, eur_cents)
+            c.execute("INSERT INTO ledger (user_id, account, label, amount, ts) VALUES (?, 'bank', ?, ?, ?)",
+                      (str(uid), f"Achat crypto · {sym}", -eur_cents, t))
             c.execute("INSERT INTO ledger (user_id, account, label, amount, ts) VALUES (?, 'wallet', ?, ?, ?)",
-                      (str(uid), f"Vente {sym}", credit_, now_ts()))
-        return credit_
+                      (str(uid), f"Achat {sym}", eur_cents - fee, t))
+        return qty, fee
+
+    def sell_crypto(self, uid, sym, eur_cents, price_eur, all_=False):
+        """Wallet -> Banque (vend pour `eur_cents` bruts, ou tout). Retourne (crédité, frais) ou (None, raison)."""
+        if not price_eur or price_eur <= 0:
+            return None, "Cours indisponible, réessaie"
+        t = now_ts()
+        with self.db.tx() as c:
+            h = c.execute("SELECT qty FROM holdings WHERE user_id = ? AND sym = ?", (str(uid), sym)).fetchone()
+            if not h or h["qty"] <= 0:
+                return None, f"Tu n'as pas de {sym}"
+            qty = h["qty"] if all_ else min(h["qty"], (eur_cents / 100) / price_eur)
+            if self._hold_take(c, uid, sym, qty) is None:
+                return None, "Montant invalide"
+            gross = int(qty * price_eur * 100)
+            fee = gross * self.setting("sell_fee_bp") // 10000
+            credit_ = gross - fee
+            c.execute("UPDATE users SET bank = bank + ? WHERE user_id = ?", (credit_, str(uid)))
+            c.execute("INSERT INTO ledger (user_id, account, label, amount, ts) VALUES (?, 'wallet', ?, ?, ?)",
+                      (str(uid), f"Vers la banque · {sym}", -gross, t))
+            c.execute("INSERT INTO ledger (user_id, account, label, amount, ts) VALUES (?, 'bank', ?, ?, ?)",
+                      (str(uid), f"Vente crypto · {sym}", credit_, t))
+        return credit_, fee
 
     # ---------- parties ----------
     def active_game(self, uid):
         return self.db.one("SELECT * FROM active_games WHERE user_id = ?", (str(uid),))
 
-    def start_game(self, uid, key, bet):
+    def start_game(self, uid, key, bet, sym, price_eur):
+        """Débite la mise EN CRYPTO (bet en centimes d'euro, converti au cours `price_eur`)."""
         bet = int(bet)
         cur = self.active_game(uid)
         if cur:
@@ -386,36 +459,52 @@ class Store:
             return None, f"Mise minimum : {mn / 100:.2f} €".replace(".", ",")
         if mx and bet > mx:
             return None, f"Mise maximum : {mx / 100:.2f} €".replace(".", ",")
-        if not self.take_cash(uid, bet):
-            return None, "Solde du Wallet insuffisant."
-        gid = self.db.x("INSERT INTO active_games (user_id, game, bet, ts) VALUES (?, ?, ?, ?)",
-                        (str(uid), key, bet, now_ts())).lastrowid
+        if not price_eur or price_eur <= 0:
+            return None, "Cours indisponible, réessaie"
+        qty = bet / 100 / price_eur
+        with self.db.tx() as c:
+            cost = self._hold_take(c, uid, sym, qty)
+            if cost is None:
+                return None, f"Pas assez de {sym} dans ton Wallet"
+            gid = c.execute("INSERT INTO active_games (user_id, game, bet, ts, sym, qty, price, cost, base_qty) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (str(uid), key, bet, now_ts(), sym, qty, price_eur, cost, qty)).lastrowid
         return gid, None
 
-    def raise_bet(self, gid, uid, extra):
-        if not self.db.one("SELECT 1 FROM active_games WHERE id = ?", (gid,)):
-            return False
-        if not self.take_cash(uid, extra):
-            return False
-        self.db.x("UPDATE active_games SET bet = bet + ? WHERE id = ?", (int(extra), gid))
+    def raise_bet(self, gid, uid):
+        """Double la mise (blackjack) dans la même crypto, au même cours."""
+        with self.db.tx() as c:
+            row = c.execute("SELECT * FROM active_games WHERE id = ?", (gid,)).fetchone()
+            if not row or not row["sym"]:
+                return False
+            cost = self._hold_take(c, uid, row["sym"], row["base_qty"])
+            if cost is None:
+                return False
+            c.execute("UPDATE active_games SET bet = bet * 2, qty = qty + base_qty, cost = cost + ? WHERE id = ?", (cost, gid))
         return True
 
     def settle_game(self, gid, payout, mult, nonce):
-        """Clôture et paie. Idempotent : un second appel ne verse rien."""
+        """Clôture et paie (en crypto). Idempotent : un second appel ne verse rien."""
         with self.db.tx() as c:
             row = c.execute("SELECT * FROM active_games WHERE id = ?", (gid,)).fetchone()
             if row is None:
                 return None
             c.execute("DELETE FROM active_games WHERE id = ?", (gid,))
             uid, bet, payout = row["user_id"], row["bet"], int(payout)
+            pay_qty = row["qty"] * mult
+            if row["sym"]:
+                if pay_qty > 0:
+                    # le coût d'achat suit le gain : le prix moyen du Wallet ne reflète que le marché
+                    self._hold_add(c, uid, row["sym"], pay_qty, int(row["cost"] * mult))
+            else:  # partie lancée avant la V3 : paiement en banque
+                c.execute("UPDATE users SET bank = bank + ? WHERE user_id = ?", (payout, uid))
             u = c.execute("SELECT wagered FROM users WHERE user_id = ?", (uid,)).fetchone()
             rate = vip_for(u["wagered"] if u else 0)[3]
-            c.execute("UPDATE users SET cash = cash + ?, wagered = wagered + ?, won = won + ?, profit = profit + ?, games = games + 1, "
+            c.execute("UPDATE users SET wagered = wagered + ?, won = won + ?, profit = profit + ?, games = games + 1, "
                       "biggest_win = MAX(biggest_win, ?), best_mult = MAX(best_mult, ?), rakeback = rakeback + ? WHERE user_id = ?",
-                      (payout, bet, payout, payout - bet, payout - bet, float(mult) if payout > bet else 0, bet * HOUSE_EDGE * rate, uid))
-            c.execute("INSERT INTO bets (user_id, game, bet, payout, mult, nonce, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                      (uid, row["game"], bet, payout, float(mult), nonce, now_ts()))
-        return {"bet": bet, "payout": payout, "user_id": uid, "game": row["game"]}
+                      (bet, payout, payout - bet, payout - bet, float(mult) if payout > bet else 0, bet * HOUSE_EDGE * rate, uid))
+            c.execute("INSERT INTO bets (user_id, game, bet, payout, mult, nonce, ts, sym) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                      (uid, row["game"], bet, payout, float(mult), nonce, now_ts(), row["sym"]))
+        return {"bet": bet, "payout": payout, "user_id": uid, "game": row["game"], "sym": row["sym"], "qty": pay_qty}
 
     def refund_game(self, gid):
         with self.db.tx() as c:
@@ -423,7 +512,10 @@ class Store:
             if row is None:
                 return False
             c.execute("DELETE FROM active_games WHERE id = ?", (gid,))
-            c.execute("UPDATE users SET cash = cash + ? WHERE user_id = ?", (row["bet"], row["user_id"]))
+            if row["sym"]:
+                self._hold_add(c, row["user_id"], row["sym"], row["qty"], row["cost"])
+            else:
+                c.execute("UPDATE users SET bank = bank + ? WHERE user_id = ?", (row["bet"], row["user_id"]))
         return True
 
     def refund_all_active(self):
@@ -437,9 +529,83 @@ class Store:
         amount = int(u["rakeback"])
         if amount < 1:
             return 0
-        self.db.x("UPDATE users SET cash = cash + ?, rakeback = rakeback - ? WHERE user_id = ?", (amount, amount, str(uid)))
-        self.log(uid, "wallet", "Rakeback VIP", amount)
+        self.db.x("UPDATE users SET bank = bank + ?, rakeback = rakeback - ? WHERE user_id = ?", (amount, amount, str(uid)))
+        self.log(uid, "bank", "Rakeback VIP", amount)
         return amount
+
+    # ---------- boutique ----------
+    def shop_items(self, all_=False):
+        return self.db.all("SELECT * FROM shop" + ("" if all_ else " WHERE active = 1") + " ORDER BY price ASC, item_id ASC")
+
+    def shop_item(self, item_id):
+        return self.db.one("SELECT * FROM shop WHERE item_id = ?", (int(item_id),))
+
+    def save_item(self, d):
+        """Crée ou met à jour un article. d : name, description, price, kind, role_id, stock, per_user, item_id?"""
+        vals = (d["name"][:60], (d.get("description") or "")[:120] or None, int(d["price"]), d["kind"],
+                str(d["role_id"]) if d.get("role_id") else None, int(d.get("stock", -1)), int(d.get("per_user", 0)))
+        if d.get("item_id"):
+            self.db.x("UPDATE shop SET name = ?, description = ?, price = ?, kind = ?, role_id = ?, stock = ?, per_user = ?, active = 1 "
+                      "WHERE item_id = ?", vals + (int(d["item_id"]),))
+            return int(d["item_id"])
+        return self.db.x("INSERT INTO shop (name, description, price, kind, role_id, stock, per_user) VALUES (?, ?, ?, ?, ?, ?, ?)", vals).lastrowid
+
+    def user_orders_count(self, uid, item_id):
+        return self.db.one("SELECT COUNT(*) AS n FROM orders WHERE user_id = ? AND item_id = ? AND status != 'refunded'",
+                           (str(uid), int(item_id)))["n"]
+
+    def buy_item(self, uid, item_id, guild_id=None):
+        """Achat atomique : vérifie stock, limite par joueur et wallet. Retourne (commande, None) ou (None, erreur)."""
+        self.ensure(uid)
+        with self.db.tx() as c:
+            it = c.execute("SELECT * FROM shop WHERE item_id = ? AND active = 1", (int(item_id),)).fetchone()
+            if not it:
+                return None, "Article introuvable"
+            if it["stock"] >= 0 and it["sold"] >= it["stock"]:
+                return None, "Article épuisé"
+            if it["per_user"] > 0:
+                n = c.execute("SELECT COUNT(*) FROM orders WHERE user_id = ? AND item_id = ? AND status != 'refunded'",
+                              (str(uid), it["item_id"])).fetchone()[0]
+                if n >= it["per_user"]:
+                    return None, f"Limite atteinte ({it['per_user']} par joueur)"
+            r = c.execute("UPDATE users SET bank = bank - ? WHERE user_id = ? AND bank >= ?", (it["price"], str(uid), it["price"]))
+            if r.rowcount != 1:
+                return None, f"Banque insuffisante · il faut {it['price'] / 100:.2f} €".replace(".", ",")
+            c.execute("UPDATE shop SET sold = sold + 1 WHERE item_id = ?", (it["item_id"],))
+            auto = ITEM_KINDS.get(it["kind"], ITEM_KINDS["custom"])[3]
+            t = now_ts()
+            oid = c.execute("INSERT INTO orders (item_id, user_id, guild_id, name, kind, price, status, ts, done_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (it["item_id"], str(uid), str(guild_id) if guild_id else None, it["name"], it["kind"], it["price"],
+                             "delivered" if auto else "pending", t, t if auto else None)).lastrowid
+            c.execute("INSERT INTO ledger (user_id, account, label, amount, ts) VALUES (?, 'bank', ?, ?, ?)",
+                      (str(uid), f"Boutique · {it['name']}", -it["price"], t))
+        return self.order(oid), None
+
+    def order(self, oid):
+        return self.db.one("SELECT * FROM orders WHERE id = ?", (int(oid),))
+
+    def pending_orders(self, guild_id=None, n=25):
+        if guild_id:
+            return self.db.all("SELECT * FROM orders WHERE status = 'pending' AND guild_id = ? ORDER BY id LIMIT ?", (str(guild_id), n))
+        return self.db.all("SELECT * FROM orders WHERE status = 'pending' ORDER BY id LIMIT ?", (n,))
+
+    def deliver_order(self, oid, staff_id):
+        r = self.db.x("UPDATE orders SET status = 'delivered', staff_id = ?, done_ts = ? WHERE id = ? AND status = 'pending'",
+                      (str(staff_id), now_ts(), int(oid)))
+        return r.rowcount == 1
+
+    def refund_order(self, oid, staff_id=None):
+        """Rembourse une commande (en attente, ou livrée automatiquement mais en échec). Idempotent."""
+        with self.db.tx() as c:
+            o = c.execute("SELECT * FROM orders WHERE id = ? AND status != 'refunded'", (int(oid),)).fetchone()
+            if not o:
+                return None
+            c.execute("UPDATE orders SET status = 'refunded', staff_id = ?, done_ts = ? WHERE id = ?", (str(staff_id or ""), now_ts(), o["id"]))
+            c.execute("UPDATE shop SET sold = MAX(0, sold - 1) WHERE item_id = ?", (o["item_id"],))
+            c.execute("UPDATE users SET bank = bank + ? WHERE user_id = ?", (o["price"], o["user_id"]))
+            c.execute("INSERT INTO ledger (user_id, account, label, amount, ts) VALUES (?, 'bank', ?, ?, ?)",
+                      (o["user_id"], f"Remboursement · {o['name']}", o["price"], now_ts()))
+        return dict(o)
 
     # ---------- seeds ----------
     def seeds(self, uid):

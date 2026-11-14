@@ -52,6 +52,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DEFAULT_BUYER_IDS = [142365250803466240, 1546586066407133308]
 PHONE_TIMEOUT = 300
 CRASH_TICK = 1.25
+TOAST_SECONDS = 3
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%d/%m/%Y %H:%M:%S")
 log = logging.getLogger("casino")
@@ -160,9 +161,35 @@ def guide_embed(key):
     return em
 
 
+def beginner_embed():
+    p = prefix()
+    buy = f"{store.setting('buy_fee_bp') / 100:g} %".replace(".", ",")
+    sell = f"{store.setting('sell_fee_bp') / 100:g} %".replace(".", ",")
+    em = discord.Embed(title="🌱 Guide du débutant", color=0x2BD67B,
+                       description=f"Tout se passe sur ton téléphone : tape **`{p}phone`** pour l'allumer, puis utilise les boutons et les menus.")
+    em.add_field(name="1. Gagne de l'argent (Banque)", inline=False,
+                 value=f"Tout ce que tu gagnes arrive sur ta **Banque**, en euros : récompense quotidienne (`{p}daily`), "
+                       f"salaire de ton métier (app **Métiers**, bouton Travailler), intérêts de ton livret d'épargne.")
+    em.add_field(name="2. Achète de la crypto (Wallet)", inline=False,
+                 value=f"Le casino se joue **uniquement en crypto**. Ouvre l'app **Wallet**, choisis une crypto dans le menu "
+                       f"« Acheter » et indique combien d'euros de ta banque tu veux convertir (frais : {buy}).\n"
+                       f"Pour débuter, prends de l'**USDT** : sa valeur reste stable. Les autres cryptos (BTC, ETH…) suivent le vrai cours et peuvent monter ou baisser.")
+    em.add_field(name="3. Joue au casino", inline=False,
+                 value="Ouvre l'app **Casino**, choisis la crypto avec laquelle tu joues dans le dernier menu, puis un jeu. "
+                       "Ta mise est indiquée en euros et prise dans ta crypto ; tes gains reviennent dans la même crypto.")
+    em.add_field(name="4. Récupère tes gains", inline=False,
+                 value=f"Dans le **Wallet**, choisis ta crypto puis **Vendre (wallet → banque)** : l'argent revient sur ta banque "
+                       f"(frais : {sell}). C'est avec ta banque que tu achètes dans la **Boutique** et que tu fais des virements.")
+    em.add_field(name="Commandes utiles", inline=False,
+                 value=f"`{p}phone` · `{p}banque` · `{p}wallet` · `{p}casino` · `{p}daily` · `{p}work` · `{p}guide <jeu>`")
+    em.set_footer(text="Monnaie virtuelle : rien ne s'achète ni ne se retire avec de l'argent réel.")
+    return em
+
+
 def guide_home_embed():
-    em = discord.Embed(title="📖 Guide des jeux",
-                       description="Choisis un jeu dans le menu pour voir ses règles en 30 secondes.", color=0x5865F2)
+    em = discord.Embed(title="📖 Guide",
+                       description="Nouveau ? Choisis **Guide du débutant** dans le menu. Sinon, choisis un jeu pour voir ses règles en 30 secondes.",
+                       color=0x5865F2)
     em.add_field(name="⭐ Originals", value=" · ".join(v[0] for v in GAMES.values() if v[3] == "originals"), inline=False)
     em.add_field(name="🃏 Casino", value=" · ".join(v[0] for v in GAMES.values() if v[3] == "casino"), inline=False)
     return em
@@ -172,16 +199,20 @@ class GuideView(discord.ui.View):
     def __init__(self, author_id=None):
         super().__init__(timeout=300)
         self.author_id = author_id
-        sel = discord.ui.Select(placeholder="📖 Choisis un jeu à expliquer…",
-                                options=[discord.SelectOption(label=v[0], value=k, description=GUIDE[k][0][:100]) for k, v in GAMES.items()])
+        opts = [discord.SelectOption(label="Guide du débutant", value="__debutant", emoji="🌱",
+                                     description="Banque, Wallet, crypto, casino : comment tout utiliser")]
+        opts += [discord.SelectOption(label=v[0], value=k, description=GUIDE[k][0][:100]) for k, v in GAMES.items()]
+        sel = discord.ui.Select(placeholder="📖 Choisis un guide…", options=opts)
         sel.callback = self._pick
         self.sel = sel
         self.add_item(sel)
 
     async def _pick(self, inter):
+        v = self.sel.values[0]
+        em = beginner_embed() if v == "__debutant" else guide_embed(v)
         if self.author_id and inter.user.id != self.author_id:
-            return await inter.response.send_message(embed=guide_embed(self.sel.values[0]), ephemeral=True)
-        await inter.response.edit_message(embed=guide_embed(self.sel.values[0]), view=self)
+            return await inter.response.send_message(embed=em, ephemeral=True)
+        await inter.response.edit_message(embed=em, view=self)
 
 
 # ========================= MODALE GÉNÉRIQUE =========================
@@ -213,7 +244,9 @@ class Phone(discord.ui.View):
         self.game = None          # partie en cours
         self.last = None          # (clé, état, résultat, footer) du dernier coup
         self.closed = False
+        self.rid = 0              # numéro du dernier affichage (sert à effacer les notifications)
         self.page, self.coin, self.lb = 0, "BTC", "fortune"
+        self.play_sym = None      # crypto choisie pour jouer au casino
 
     # ---------- infra ----------
     async def interaction_check(self, inter):
@@ -263,6 +296,8 @@ class Phone(discord.ui.View):
         return cb
 
     async def show(self, inter=None, toast=None):
+        self.rid += 1
+        rid = self.rid
         self.build()
         data = await asyncio.to_thread(self.draw, toast)
         file = discord.File(BytesIO(data), filename="phone.webp")
@@ -275,6 +310,17 @@ class Phone(discord.ui.View):
                 await self.message.edit(content=None, embed=None, attachments=[file], view=self)
         except discord.HTTPException as e:
             log.warning(f"Affichage téléphone impossible : {e}")
+        if toast:
+            self.clear_toast_later(rid)
+
+    def clear_toast_later(self, rid):
+        """La notification disparaît après TOAST_SECONDS : on réaffiche l'écran tel quel, sans elle."""
+        async def later():
+            await asyncio.sleep(TOAST_SECONDS)
+            async with self.lock:
+                if not self.closed and self.rid == rid:
+                    await self.show(None)
+        asyncio.create_task(later())
 
     async def on_timeout(self):
         async with self.lock:
@@ -298,8 +344,24 @@ class Phone(discord.ui.View):
                 pass
 
     # ---------- données ----------
-    def cash(self):
-        return store.user(self.uid)["cash"]
+    def bank(self):
+        return store.user(self.uid)["bank"]
+
+    def playing(self):
+        """Crypto utilisée au casino : (sym, prix €, quantité, valeur en centimes). Choisit la plus grosse si besoin."""
+        hold = store.holdings(self.uid)
+        if not hold:
+            return None
+        if self.play_sym not in hold:
+            self.play_sym = max(hold, key=lambda s: hold[s]["qty"] * (feed.price(s) or 0))
+        sym = self.play_sym
+        p = feed.price(sym) or 0
+        q = hold[sym]["qty"]
+        return sym, p, q, int(q * p * 100)
+
+    def play_value(self):
+        p = self.playing()
+        return p[3] if p else 0
 
     def notifs(self):
         u = store.user(self.uid)
@@ -337,23 +399,34 @@ class Phone(discord.ui.View):
             vip = vip_for(u["wagered"])
             left = u["last_daily"] + 86400 - time.time()
             c = feed.coin("BTC")
-            return SA.home(dict(brand=self.brand, cash=u["cash"], bank=u["bank"], savings=u["savings"], crypto=cval,
-                                total=u["cash"] + u["bank"] + u["savings"] + cval, vip=vip[1], vip_color=vip[2],
+            return SA.home(dict(brand=self.brand, bank=u["bank"], savings=u["savings"], crypto=cval,
+                                total=u["bank"] + u["savings"] + cval, vip=vip[1], vip_color=vip[2],
                                 daily_ready=left <= 0, streak=u["streak"], daily_in=duration(left),
                                 coin=dict(sym="BTC", change=c["change"], price=int(c["price"] * 100), spark=c["spark"]) if c["price"] else None), toast)
         if s == "casino":
-            return SA.lobby(self.brand, u["cash"], [(k, v[0], v[1], v[2], v[3]) for k, v in GAMES.items()], "all", toast)
+            p = self.playing()
+            play = dict(sym=p[0], color=META[p[0]][2], value=p[3]) if p else None
+            return SA.lobby(self.brand, play, [(k, v[0], v[1], v[2], v[3]) for k, v in GAMES.items()], "all", toast)
         if s == "game":
             return self.draw_game(u, toast)
+        if s == "needcrypto":
+            return SA.need_crypto(self.brand, u["bank"], toast)
         if s == "wallet":
-            return SA.wallet(self.brand, u["cash"], self.wallet_rows(), toast)
+            val, cost, hold = self.crypto_value()
+            assets = []
+            for sym, h in hold.items():
+                co = feed.coin(sym)
+                assets.append(dict(sym=sym, name=co["name"], color=co["color"], qty=h["qty"], value=int(h["qty"] * co["price"] * 100), change=co["change"]))
+            assets.sort(key=lambda a: a["value"], reverse=True)
+            p = self.playing()
+            return SA.wallet(self.brand, val, val - cost, assets, p[0] if p else None, self.fees(), toast)
         if s == "bank":
             store.accrue(self.uid)
             u = store.user(self.uid)
             rate = store.setting("savings_rate_bp") / 100
             return SA.bank(self.brand, u["bank"], u["savings"],
                            (f"+{rate:g} % / jour".replace(".", ","), f"plafond {eur(store.setting('savings_cap'))}"),
-                           self.ledger_rows("bank"), toast)
+                           [r[:5] for r in self.ledger_rows("bank")], toast)
         if s == "crypto":
             val, cost, hold = self.crypto_value()
             coins = feed.all()
@@ -366,7 +439,7 @@ class Phone(discord.ui.View):
             h = store.holdings(self.uid).get(self.coin)
             qty = h["qty"] if h else 0
             avg = int(h["cost"] / qty) if h and qty else None
-            return SA.crypto_coin(co, qty, int(qty * co["price"] * 100), u["cash"], avg, toast)
+            return SA.crypto_coin(co, qty, int(qty * co["price"] * 100), u["bank"], avg, self.fees(), toast)
         if s == "jobs":
             return self.draw_jobs(u, toast)
         if s == "profile":
@@ -374,9 +447,7 @@ class Phone(discord.ui.View):
         if s == "top":
             return self.draw_top(toast)
         if s == "shop":
-            items = store.db.all("SELECT * FROM shop ORDER BY price ASC")
-            roles = {str(r.id) for r in getattr(self.m, "roles", [])}
-            return SA.shop(u["cash"], [(i["item_id"], i["name"], i["price"], i["description"], bool(i["role_id"] and i["role_id"] in roles)) for i in items], toast)
+            return SA.shop(u["bank"], self.shop_rows(), toast)
         if s == "fair":
             sd = store.seeds(self.uid)
             prev = (sd["prev_server"], sd["prev_client"], sd["prev_nonce"]) if sd["prev_server"] else None
@@ -384,6 +455,16 @@ class Phone(discord.ui.View):
         if s == "help":
             return SA.help_screen(self.help_groups(), toast)
         return SA.lock(self.brand, self.notifs(), toast)
+
+    def shop_rows(self):
+        roles = {str(r.id) for r in getattr(self.m, "roles", [])}
+        out = []
+        for i in store.shop_items():
+            out.append(dict(id=i["item_id"], name=i["name"], price=i["price"], desc=i["description"], kind=i["kind"],
+                            owned=i["kind"] == "role" and bool(i["role_id"]) and i["role_id"] in roles,
+                            left=None if i["stock"] < 0 else max(0, i["stock"] - i["sold"]),
+                            bought=store.user_orders_count(self.uid, i["item_id"]) if i["per_user"] else 0, limit=i["per_user"]))
+        return out
 
     def ledger_rows(self, account):
         rows = []
@@ -406,13 +487,10 @@ class Phone(discord.ui.View):
             rows.append((label, when(r["ts"]), r["amount"], badge, color, r["ts"]))
         return rows
 
-    def wallet_rows(self):
-        rows = [r for r in self.ledger_rows("wallet")]
-        for b in store.recent_bets(self.uid, 6):
-            name = GAMES.get(b["game"], (b["game"],))[0]
-            rows.append((name, when(b["ts"]), b["payout"] - b["bet"], name[:2].upper(), GAMES.get(b["game"], ("", "", "#7FB0FF"))[2], b["ts"]))
-        rows.sort(key=lambda r: r[5], reverse=True)
-        return [r[:5] for r in rows[:6]]
+    @staticmethod
+    def fees():
+        f = lambda bp: f"{bp / 100:g} %".replace(".", ",")
+        return f(store.setting("buy_fee_bp")), f(store.setting("sell_fee_bp"))
 
     def draw_jobs(self, u, toast):
         lvl, xp, need = level_of(u["xp"])
@@ -456,8 +534,9 @@ class Phone(discord.ui.View):
             badges.append(("HODL", "#2A1F4D", "#B9A2FF"))
         if vip[0] >= 250_000:
             badges.append(("VIP", "#3B2E0A", "#F5C451"))
-        fortune = u["cash"] + u["bank"] + u["savings"]
-        rank = store.db.one("SELECT COUNT(*) AS n FROM users WHERE cash + bank + savings > ?", (fortune,))["n"] + 1
+        fortunes = self.fortunes()
+        mine = fortunes.get(str(self.uid), 0)
+        rank = sum(1 for v in fortunes.values() if v > mine) + 1
         pct = (u["wagered"] - vip[0]) / max(1, nxt[0] - vip[0]) if nxt else 1
         return SA.profile(dict(name=self.brand, vip=vip[1], vip_color=vip[2], next_vip=nxt[1] if nxt else None, pct=min(1, pct),
                                left=(nxt[0] - u["wagered"]) if nxt else 0, job=f"{job[1]} niv. {lvl}",
@@ -466,31 +545,43 @@ class Phone(discord.ui.View):
                                       ("Plus gros gain", eur(max(0, u["biggest_win"])), "#F5C451")],
                                fav=GAMES[fav["game"]][0] if fav and fav["game"] in GAMES else None, badges=badges, rank=rank), toast)
 
-    LB = {"fortune": ("Fortune (wallet + banque)", "cash + bank + savings"), "wagered": ("Total misé", "wagered"), "profit": ("Profit", "profit")}
+    LB = {"fortune": "Fortune (banque + épargne + crypto)", "wagered": "Total misé au casino", "profit": "Profit au casino"}
+
+    @staticmethod
+    def fortunes():
+        """Fortune de chaque joueur en centimes : banque + épargne + valeur de sa crypto au cours actuel."""
+        out = {r["user_id"]: r["bank"] + r["savings"] for r in store.db.all("SELECT user_id, bank, savings FROM users")}
+        for h in store.db.all("SELECT user_id, sym, qty FROM holdings WHERE qty > 0"):
+            out[h["user_id"]] = out.get(h["user_id"], 0) + int(h["qty"] * (feed.price(h["sym"]) or 0) * 100)
+        return out
 
     def draw_top(self, toast):
-        label, expr = self.LB[self.lb]
-        rows = store.db.all(f"SELECT user_id, {expr} AS v FROM users ORDER BY v DESC LIMIT 10")
-        out = [(i + 1, member_name(self.guild, r["user_id"]), eur(r["v"]), r["user_id"] == str(self.uid)) for i, r in enumerate(rows)]
+        label = self.LB[self.lb]
+        if self.lb == "fortune":
+            vals = self.fortunes()
+        else:
+            vals = {r["user_id"]: r["v"] for r in store.db.all(f"SELECT user_id, {self.lb} AS v FROM users")}
+        ranked = sorted(vals.items(), key=lambda kv: kv[1], reverse=True)
+        out = [(i + 1, member_name(self.guild, uid), eur(v), uid == str(self.uid)) for i, (uid, v) in enumerate(ranked[:10])]
         me = None
         if not any(r[3] for r in out):
-            mine = store.db.one(f"SELECT {expr} AS v FROM users WHERE user_id = ?", (str(self.uid),))
-            pos = store.db.one(f"SELECT COUNT(*) AS n FROM users WHERE {expr} > ?", (mine["v"],))["n"] + 1
-            me = (pos, eur(mine["v"]))
+            pos = next((i + 1 for i, (uid, _v) in enumerate(ranked) if uid == str(self.uid)), len(ranked) + 1)
+            me = (pos, eur(vals.get(str(self.uid), 0)))
         return SA.leaderboard(label, out, me, toast)
 
     def help_groups(self):
         p = prefix()
-        g = [("Jouer", [("Casino", f"19 jeux · {p}casino ou {p}<jeu> [mise]", "#7C4DFF", "dice"),
-                        ("Guide", f"Les règles de chaque jeu · {p}guide", "#5A6578", "book"),
+        g = [("Jouer", [("Casino", f"19 jeux en crypto · {p}casino ou {p}<jeu> [mise]", "#7C4DFF", "dice"),
+                        ("Guide", f"Débutant et règles des jeux · {p}guide", "#5A6578", "book"),
                         ("Provably fair", "Vérifie chaque tirage", "#0E8A8A", "shield")]),
-             ("Argent", [("Wallet et Banque", f"Liquide, compte, épargne · {p}wallet {p}banque", "#2F6BFF", "bank"),
-                         ("Crypto", f"15 cryptos au cours réel · {p}crypto", "#17A660", "chart"),
-                         ("Métiers et Daily", f"Salaire, niveaux · {p}metiers {p}daily", "#D9573B", "job")])]
+             ("Argent", [("Banque", f"Salaires, daily, épargne, virements · {p}banque", "#2F6BFF", "bank"),
+                         ("Wallet crypto", f"Acheter, vendre, jouer · {p}wallet {p}marche", "#E0A526", "wallet"),
+                         ("Métiers et Daily", f"Gagne de l'argent · {p}metiers {p}daily", "#D9573B", "job")])]
         r = store.rank(self.uid)
         if r >= 2:
             g.append(("Staff", [("Économie", f"{p}addmoney {p}removemoney {p}setmoney {p}resetbalance", "#5A6578", "wallet"),
-                                ("Salons et boutique", f"{p}allow {p}unallow {p}additem {p}delitem", "#3B4252", "sliders")]))
+                                ("Boutique", f"{p}additem {p}edititem {p}items {p}commandes", "#D6336C", "bag"),
+                                ("Salons", f"{p}allow {p}unallow {p}setorders {p}setlog", "#3B4252", "sliders")]))
         return g
 
     # ---------- construction des boutons ----------
@@ -501,7 +592,7 @@ class Phone(discord.ui.View):
             u = store.user(self.uid)
             ready = time.time() - u["last_daily"] >= 86400
             for label, scr, st in (("Casino", "casino", BLUE), ("Wallet", "wallet", GREY), ("Banque", "bank", GREY),
-                                   ("Crypto", "crypto", GREY), ("Métiers", "jobs", GREY)):
+                                   ("Marché", "crypto", GREY), ("Métiers", "jobs", GREY)):
                 self.B(label, self.go(scr), st, 0)
             for label, scr in (("Profil", "profile"), ("Top", "top"), ("Boutique", "shop")):
                 self.B(label, self.go(scr), GREY, 1)
@@ -514,46 +605,69 @@ class Phone(discord.ui.View):
             for row, cat, ph in ((0, "originals", "⭐ Originals : choisis un jeu…"), (1, "casino", "🃏 Casino : choisis un jeu…")):
                 opts = [discord.SelectOption(label=v[0], value=k, description=GUIDE[k][0][:100]) for k, v in GAMES.items() if v[3] == cat]
                 self.S(ph, opts, self.pick_game, row)
-            self.B("Accueil", self.go("home"), GREY, 2)
-            self.B("Guide", self.guide_btn, GREY, 2, emoji="📖")
+            hold = store.holdings(self.uid)
+            if hold:
+                p = self.playing()
+                opts = []
+                for sym, h in hold.items():
+                    v = int(h["qty"] * (feed.price(sym) or 0) * 100)
+                    opts.append(discord.SelectOption(label=f"Jouer en {sym} · {META[sym][1]}", value=sym, default=bool(p) and sym == p[0],
+                                                     description=f"Solde : {eur(v)}"[:100]))
+                self.S("Choisis la crypto avec laquelle tu joues…", opts, self.set_play, 2)
+                self.B("Accueil", self.go("home"), GREY, 3)
+                self.B("Wallet", self.go("wallet"), GREY, 3)
+                self.B("Guide", self.guide_btn, GREY, 3, emoji="📖")
+            else:
+                self.B("Acheter de la crypto pour jouer", self.go("needcrypto"), GREEN, 2, emoji="🪙")
+                self.B("Accueil", self.go("home"), GREY, 2)
+                self.B("Guide", self.guide_btn, GREY, 2, emoji="📖")
+        elif s == "needcrypto":
+            self.B("Acheter de l'USDT (stable)", self.open_coin("USDT"), GREEN, 0, emoji="🪙")
+            self.B("Choisir une autre crypto", self.go("crypto"), BLUE, 0)
+            self.B("Guide débutant", self.beginner_btn, GREY, 1, emoji="📖")
+            self.B("Banque", self.go("bank"), GREY, 1)
+            self.B("Accueil", self.go("home"), GREY, 1)
         elif s == "game":
             if self.game:
                 self.build_live()
             else:
                 self.build_setup()
         elif s == "wallet":
-            self.B("Envoyer", self.send_money, BLUE, 0)
-            self.B("Déposer en banque", self.to_bank, GREY, 0)
-            self.B("Retirer de la banque", self.from_bank, GREY, 0)
-            self.B("Accueil", self.go("home"), GREY, 1)
-            self.B("Banque", self.go("bank"), GREY, 1)
-            self.B("Crypto", self.go("crypto"), GREY, 1)
+            self.S("Acheter une crypto avec ma banque…", self.coin_options(), self.pick_coin, 0)
+            hold = store.holdings(self.uid)
+            if hold:
+                self.S("Mes cryptos : vendre vers la banque, jouer…",
+                       [discord.SelectOption(label=f"{sym} · {META[sym][1]}", value=sym,
+                                             description=f"{h['qty']:.8g} {sym} · {eur(int(h['qty'] * (feed.price(sym) or 0) * 100))}"[:100])
+                        for sym, h in hold.items()], self.pick_coin, 1)
+            self.B("Casino", self.go("casino"), BLUE, 2, emoji="🎰")
+            self.B("Marché", self.go("crypto"), GREY, 2)
+            self.B("Banque", self.go("bank"), GREY, 2)
+            self.B("Accueil", self.go("home"), GREY, 2)
         elif s == "bank":
-            self.B("Déposer", self.to_bank, GREEN, 0)
-            self.B("Retirer", self.from_bank, GREY, 0)
+            self.B("Acheter de la crypto", self.go("wallet"), GREEN, 0, emoji="🪙")
             self.B("Virement", self.wire, BLUE, 0)
             self.B("Épargner", self.to_savings, GREY, 1)
             self.B("Débloquer l'épargne", self.from_savings, GREY, 1)
             self.B("Accueil", self.go("home"), GREY, 2)
             self.B("Wallet", self.go("wallet"), GREY, 2)
+            self.B("Boutique", self.go("shop"), GREY, 2)
         elif s == "crypto":
-            opts = []
-            for sym, name, _c, _g in COINS:
-                p = feed.price(sym)
-                opts.append(discord.SelectOption(label=f"{sym} · {name}", value=sym,
-                                                 description=(SA._price(p) if p else "cours indisponible")[:100]))
-            self.S("Choisis une crypto à acheter ou vendre…", opts, self.pick_coin, 0)
+            self.S("Choisis une crypto à acheter…", self.coin_options(), self.pick_coin, 0)
             self.B("◀", self.crypto_page(-1), GREY, 1, disabled=self.page == 0)
             self.B("▶", self.crypto_page(1), GREY, 1, disabled=self.page >= 1)
             self.B("Actualiser", self.go("crypto"), GREY, 1)
+            self.B("Wallet", self.go("wallet"), GREY, 1)
             self.B("Accueil", self.go("home"), GREY, 1)
         elif s == "coin":
-            self.B("Acheter", self.buy_coin, GREEN, 0)
-            self.B("Vendre", self.sell_coin, RED, 0)
-            self.B("Tout vendre", self.sell_all, GREY, 0)
-            self.B("Actualiser", self.go("coin"), GREY, 0)
-            self.B("Crypto", self.go("crypto"), GREY, 1)
-            self.B("Accueil", self.go("home"), GREY, 1)
+            held = store.qty_of(self.uid, self.coin) > 0
+            self.B("Acheter (banque → wallet)", self.buy_coin, GREEN, 0)
+            self.B("Vendre (wallet → banque)", self.sell_coin, RED, 0, disabled=not held)
+            self.B("Tout vendre", self.sell_all, GREY, 1, disabled=not held)
+            self.B(f"Jouer au casino en {self.coin}", self.play_with(self.coin), BLUE, 1, emoji="🎰", disabled=not held)
+            self.B("Wallet", self.go("wallet"), GREY, 2)
+            self.B("Marché", self.go("crypto"), GREY, 2)
+            self.B("Accueil", self.go("home"), GREY, 2)
         elif s == "jobs":
             u = store.user(self.uid)
             job = JOB_BY_KEY.get(u["job"], JOBS[0])
@@ -578,11 +692,17 @@ class Phone(discord.ui.View):
                 self.B(lab, self.set_lb(k), BLUE if self.lb == k else GREY, 0)
             self.B("Accueil", self.go("home"), GREY, 0)
         elif s == "shop":
-            items = store.db.all("SELECT * FROM shop ORDER BY price ASC")
+            items = store.shop_items()
             if items:
-                self.S("Acheter un article…", [discord.SelectOption(label=f"#{i['item_id']} · {i['name']}"[:100], value=str(i["item_id"]),
-                                                                    description=eur(i["price"])) for i in items], self.buy_item, 0)
+                opts = []
+                for i in items:
+                    kind = C.ITEM_KINDS.get(i["kind"], C.ITEM_KINDS["custom"])[0]
+                    left = "" if i["stock"] < 0 else f" · {max(0, i['stock'] - i['sold'])} en stock"
+                    opts.append(discord.SelectOption(label=i["name"][:100], value=str(i["item_id"]),
+                                                     description=f"{eur(i['price'])} · {kind}{left}"[:100]))
+                self.S("Acheter un article…", opts, self.buy_item, 0)
             self.B("Accueil", self.go("home"), GREY, 1)
+            self.B("Wallet", self.go("wallet"), GREY, 1)
         elif s == "fair":
             self.B("Changer de seed", self.new_seed, BLUE, 0)
             self.B("Accueil", self.go("home"), GREY, 0)
@@ -605,11 +725,11 @@ class Phone(discord.ui.View):
         amount, info = store.claim_daily(self.uid)
         if amount is None:
             return await self.show(inter, (f"Daily déjà récupérée · reviens dans {duration(info - time.time())}", "err"))
-        await self.show(inter, (f"Daily récupérée : {eur(amount, True)} (série {info})", "gold"))
+        await self.show(inter, (f"Daily : {eur(amount, True)} sur ta banque (série {info})", "gold"))
 
     async def rakeback(self, inter):
         amt = store.claim_rakeback(self.uid)
-        await self.show(inter, (f"Rakeback versé : {eur(amt, True)}", "ok") if amt else ("Rien à récupérer", "info"))
+        await self.show(inter, (f"Rakeback versé en banque : {eur(amt, True)}", "ok") if amt else ("Rien à récupérer", "info"))
 
     def set_lb(self, k):
         async def cb(inter):
@@ -639,20 +759,6 @@ class Phone(discord.ui.View):
         return opener
 
     @property
-    def to_bank(self):
-        async def act(i, amt):
-            ok = store.move(self.uid, "cash", "bank", amt, "Dépôt en banque", "Dépôt depuis le wallet")
-            await self.show(i, (f"{eur(amt)} déposés en banque", "ok") if ok else ("Wallet insuffisant", "err"))
-        return self._amount_modal("Déposer en banque", "Montant à déposer", lambda: store.user(self.uid)["cash"], act)
-
-    @property
-    def from_bank(self):
-        async def act(i, amt):
-            ok = store.move(self.uid, "bank", "cash", amt, "Retrait vers le wallet", "Retrait banque")
-            await self.show(i, (f"{eur(amt)} retirés vers le wallet", "ok") if ok else ("Compte en banque insuffisant", "err"))
-        return self._amount_modal("Retirer de la banque", "Montant à retirer", lambda: store.user(self.uid)["bank"], act)
-
-    @property
     def to_savings(self):
         async def act(i, amt):
             ok = store.move(self.uid, "bank", "savings", amt, "Versement livret", "Versement livret")
@@ -680,21 +786,26 @@ class Phone(discord.ui.View):
                     return await self.show(i, ("Solde insuffisant", "err"))
                 await self.show(i, (f"{eur(amt)} envoyés à {brand_of(target)}", "ok"))
                 em = discord.Embed(title="💸 Virement", color=0x3498db, timestamp=datetime.now(timezone.utc),
-                                   description=f"{self.m.mention} → {target.mention} : **{eur(amt)}** ({'banque' if src == 'bank' else 'wallet'})")
+                                   description=f"{self.m.mention} → {target.mention} : **{eur(amt)}** (banque)")
                 await send_log(self.guild, em)
             await inter.response.send_modal(Ask(self, title, [("Destinataire", "nom d'utilisateur, mention ou ID", True),
                                                               ("Montant", "ex : 20 · 5,50 · tout", True)], done))
         return opener
 
     @property
-    def send_money(self):
-        return self._transfer_modal("Envoyer depuis le wallet", "cash")
-
-    @property
     def wire(self):
         return self._transfer_modal("Virement bancaire", "bank")
 
-    # ---------- crypto ----------
+    # ---------- crypto (wallet) ----------
+    def coin_options(self):
+        opts = []
+        for sym, name, _c, _g in COINS:
+            p = feed.price(sym)
+            extra = " · stable, idéal pour débuter" if sym == "USDT" else ""
+            opts.append(discord.SelectOption(label=f"{sym} · {name}", value=sym,
+                                             description=((SA._price(p) if p else "cours indisponible") + extra)[:100]))
+        return opts
+
     def crypto_page(self, d):
         async def cb(inter):
             self.page = max(0, min(1, self.page + d))
@@ -705,31 +816,53 @@ class Phone(discord.ui.View):
         self.coin, self.screen = sym, "coin"
         await self.show(inter)
 
+    def open_coin(self, sym):
+        async def cb(inter):
+            await self.pick_coin(inter, sym)
+        return cb
+
+    async def set_play(self, inter, sym):
+        self.play_sym = sym
+        await self.show(inter, (f"Tu joues maintenant en {sym}", "ok"))
+
+    def play_with(self, sym):
+        async def cb(inter):
+            self.play_sym = sym
+            self.screen = "casino"
+            await self.show(inter, (f"Tu joues maintenant en {sym}", "ok"))
+        return cb
+
     @property
     def buy_coin(self):
         async def act(i, amt):
-            p = feed.price(self.coin)
-            if not p:
-                return await self.show(i, ("Cours indisponible, réessaie", "err"))
-            qty = store.buy_crypto(self.uid, self.coin, amt, p)
-            await self.show(i, (f"Acheté {qty:.6g} {self.coin}", "ok") if qty else ("Wallet insuffisant", "err"))
-        return self._amount_modal("Acheter", "Montant en euros", lambda: store.user(self.uid)["cash"], act)
+            qty, info = store.buy_crypto(self.uid, self.coin, amt, feed.price(self.coin))
+            if qty is None:
+                return await self.show(i, (info, "err"))
+            if self.play_sym is None:
+                self.play_sym = self.coin
+            await self.show(i, (f"+{qty:.6g} {self.coin} dans ton Wallet · frais {eur(info)}", "ok"))
+        return self._amount_modal(f"Acheter du {self.coin}", "Montant pris sur ta banque (€)", lambda: store.user(self.uid)["bank"], act)
 
     @property
     def sell_coin(self):
         def value():
-            h = store.holdings(self.uid).get(self.coin)
-            return int(h["qty"] * (feed.price(self.coin) or 0) * 100) if h else 0
+            return int(store.qty_of(self.uid, self.coin) * (feed.price(self.coin) or 0) * 100)
 
         async def act(i, amt):
-            p = feed.price(self.coin)
-            got = store.sell_crypto(self.uid, self.coin, amt, p or 0, all_=amt >= value())
-            await self.show(i, (f"Vendu : {eur(got, True)} sur ton wallet", "ok") if got else (f"Tu n'as pas de {self.coin}", "err"))
-        return self._amount_modal("Vendre", "Montant en euros à vendre", value, act)
+            got, info = store.sell_crypto(self.uid, self.coin, amt, feed.price(self.coin), all_=amt >= value())
+            if got is None:
+                return await self.show(i, (info, "err"))
+            await self.show(i, (f"{eur(got, True)} versés sur ta banque · frais {eur(info)}", "ok"))
+        return self._amount_modal(f"Vendre du {self.coin}", "Montant à envoyer vers la banque (€)", value, act)
 
     async def sell_all(self, inter):
-        got = store.sell_crypto(self.uid, self.coin, 0, feed.price(self.coin) or 0, all_=True)
-        await self.show(inter, (f"Tout vendu : {eur(got, True)}", "ok") if got else (f"Tu n'as pas de {self.coin}", "err"))
+        got, info = store.sell_crypto(self.uid, self.coin, 0, feed.price(self.coin), all_=True)
+        if got is None:
+            return await self.show(inter, (info, "err"))
+        await self.show(inter, (f"Tout vendu : {eur(got, True)} sur ta banque · frais {eur(info)}", "ok"))
+
+    async def beginner_btn(self, inter):
+        await inter.response.send_message(embed=beginner_embed(), ephemeral=True)
 
     # ---------- métiers / boutique ----------
     async def work(self, inter):
@@ -743,23 +876,30 @@ class Phone(discord.ui.View):
         await self.show(inter, (err, "err") if err else (f"Nouveau métier : {JOB_BY_KEY[key][1]}", "ok"))
 
     async def buy_item(self, inter, item_id):
-        it = store.db.one("SELECT * FROM shop WHERE item_id = ?", (int(item_id),))
-        if not it:
+        it = store.shop_item(item_id)
+        if not it or not it["active"]:
             return await self.show(inter, ("Article introuvable", "err"))
-        role = self.guild.get_role(int(it["role_id"])) if it["role_id"] else None
-        if it["role_id"] and role is None:
-            return await self.show(inter, ("Le rôle lié n'existe plus", "err"))
-        if role and role in self.m.roles:
-            return await self.show(inter, ("Tu possèdes déjà cet article", "info"))
-        if not store.take_cash(self.uid, it["price"], f"Achat · {it['name']}"):
-            return await self.show(inter, ("Wallet insuffisant", "err"))
+        role = None
+        if it["kind"] == "role":
+            role = self.guild.get_role(int(it["role_id"])) if it["role_id"] else None
+            if role is None:
+                return await self.show(inter, ("Le rôle de cet article n'existe plus", "err"))
+            if role in self.m.roles:
+                return await self.show(inter, ("Tu possèdes déjà ce rôle", "info"))
+        order, err = store.buy_item(self.uid, it["item_id"], self.guild.id)
+        if err:
+            return await self.show(inter, (err, "err"))
         if role:
             try:
-                await self.m.add_roles(role, reason=f"Boutique #{item_id}")
+                await self.m.add_roles(role, reason=f"Boutique · commande #{order['id']}")
             except discord.HTTPException:
-                store.add_cash(self.uid, it["price"], "Remboursement boutique")
+                store.refund_order(order["id"])
                 return await self.show(inter, ("Impossible de donner le rôle · remboursé", "err"))
-        await self.show(inter, (f"{it['name']} acheté !", "ok"))
+            await self.show(inter, (f"{it['name']} acheté · rôle ajouté", "ok"))
+            await send_log(self.guild, order_embed(order, self.m, "Livré automatiquement"))
+            return
+        await self.show(inter, (f"Commande #{order['id']} envoyée · le staff va te livrer", "gold"))
+        await post_order(self.guild, order, self.m)
 
     # ======================= JEUX : écran de mise =======================
     async def pick_game(self, inter, key):
@@ -767,6 +907,9 @@ class Phone(discord.ui.View):
         await self.show(inter)
 
     def open_game(self, key, bet=None):
+        if not store.holdings(self.uid) and not self.game:
+            self.screen, self.arg = "needcrypto", None  # pas de crypto : on explique comment en acheter
+            return
         self.screen, self.arg = "game", key
         eng = ENGINES[key]
         if key not in self.opts:
@@ -780,24 +923,31 @@ class Phone(discord.ui.View):
 
     def clamp_bet(self, key):
         mn, mx = store.setting("min_bet"), store.setting("max_bet")
-        cash = self.cash()
+        cash = self.play_value()
         hi = max(mn, cash if not mx else min(cash, mx))
         self.bets[key] = int(max(mn, min(self.bets[key], hi)))
+
+    def header_balance(self):
+        p = self.playing()
+        return f"{p[0]} · {eur(p[3])}" if p else "0,00 €"
 
     def draw_game(self, u, toast):
         key = self.arg
         title = GAMES[key][0]
+        bal = self.header_balance()
         if self.game:
             g = self.game
             st = g["e"].st
-            return SG.render(key, title, u["cash"], g["bet_total"], st, None, f"Partie #{g['gid']} · nonce {g['nonce']} · provably fair", toast)
+            return SG.render(key, title, bal, g["bet_total"], st, None, f"Partie #{g['gid']} · mise en {g['sym']} · provably fair", toast)
         bet = self.bets[key]
         if self.last and self.last[0] == key:
             _k, st, res, footer = self.last
-            return SG.render(key, title, u["cash"], res["bet"] if res else bet, st, res, footer, toast)
+            return SG.render(key, title, bal, res["bet"] if res else bet, st, res, footer, toast)
         eng = ENGINES[key]
         st = eng.idle(self.opts[key], CRASH_RECENT) if key == "crash" else eng.idle(self.opts[key])
-        return SG.render(key, title, u["cash"], bet, st, None, f"Mise : {eur(bet)} · ajuste-la avec les boutons", toast)
+        p = self.playing()
+        sym = p[0] if p else "crypto"
+        return SG.render(key, title, bal, bet, st, None, f"Mise : {eur(bet)} payés en {sym} · ajuste-la avec les boutons", toast)
 
     def build_setup(self):
         key = self.arg
@@ -878,7 +1028,7 @@ class Phone(discord.ui.View):
 
     async def bet_modal(self, inter):
         async def done(i, raw):
-            v = parse_eur(raw, self.cash())
+            v = parse_eur(raw, self.play_value())
             if v is None:
                 return await self.show(i, ("Mise invalide (ex : 5 · 2,50 · tout · 25%)", "err"))
             self.bets[self.arg] = v
@@ -950,23 +1100,32 @@ class Phone(discord.ui.View):
     # ======================= JEUX : partie =======================
     async def play(self, inter):
         key = self.arg
+        p = self.playing()
+        if not p:  # plus aucune crypto : écran explicatif + bouton d'achat
+            self.screen, self.arg = "needcrypto", None
+            return await self.show(inter)
+        sym, price, qty_have, value = p
+        if value < store.setting("min_bet"):
+            return await self.show(inter, (f"Plus assez de {sym} · achète de la crypto dans le Wallet", "err"))
         self.clamp_bet(key)
         bet = self.bets[key]
-        gid, err = store.start_game(self.uid, key, bet)
+        gid, err = store.start_game(self.uid, key, bet, sym, price)
         if err:
             return await self.show(inter, (err, "err"))
         rng = store.next_rng(self.uid)
         eng = ENGINES[key]
+        footer = f"Partie #{gid} · mise en {sym} · nonce {rng.nonce} · provably fair"
         try:
             if eng.INSTANT:
                 st, mult, label = eng.play(rng, self.opts[key])
                 res = self.settle(gid, bet, mult, rng.nonce, label)
-                self.last = (key, st, res, f"Partie #{gid} · nonce {rng.nonce} · provably fair")
+                self.last = (key, st, res, footer)
                 await self.show(inter)
                 await self.bigwin(key, res)
                 return
             e = eng(bet, rng, self.opts[key])
-            self.game = dict(key=key, e=e, gid=gid, nonce=rng.nonce, bet=bet, bet_total=bet, t0=None)
+            self.game = dict(key=key, e=e, gid=gid, nonce=rng.nonce, bet=bet, bet_total=bet, t0=None, sym=sym,
+                             qty=bet / 100 / price, footer=footer)
             if key == "blackjack":
                 r = e.opening()
                 if r:
@@ -988,7 +1147,8 @@ class Phone(discord.ui.View):
         r = store.settle_game(gid, payout, mult, nonce)
         if r is None:
             return None
-        return {"bet": r["bet"], "payout": r["payout"], "mult": mult, "label": label}
+        sym = r.get("sym") or ""
+        return {"bet": r["bet"], "payout": r["payout"], "mult": mult, "label": f"{label} · {sym}".strip(" ·") if label else sym}
 
     async def end_game(self, inter, mult, label):
         g = self.game
@@ -1000,7 +1160,7 @@ class Phone(discord.ui.View):
         if g["key"] == "crash":
             CRASH_RECENT.append(e.crash)
             del CRASH_RECENT[:-20]
-        self.last = (g["key"], e.st, res, f"Partie #{g['gid']} · nonce {g['nonce']} · provably fair")
+        self.last = (g["key"], e.st, res, g["footer"])
         self.game = None
         await self.show(inter)
         await self.bigwin(g["key"], res)
@@ -1058,7 +1218,7 @@ class Phone(discord.ui.View):
         elif key == "blackjack":
             self.B("Tirer", self.bj_hit, BLUE, 0, emoji="🃏")
             self.B("Rester", self.bj_stand, GREEN, 0, emoji="✋")
-            self.B("Doubler", self.bj_double, GREY, 0, emoji="✖️", disabled=len(e.player) != 2 or self.cash() < g["bet"])
+            self.B("Doubler", self.bj_double, GREY, 0, emoji="✖️", disabled=len(e.player) != 2 or store.qty_of(self.uid, g["sym"]) < g["qty"] * (1 - 1e-9))
         elif key == "videopoker":
             for i in range(5):
                 self.B(f"Garder {i + 1}", self.vp_toggle(i), GREEN if i in e.held else GREY, 0)
@@ -1217,8 +1377,8 @@ class Phone(discord.ui.View):
         e = g["e"]
         if len(e.player) != 2:
             return await self.show(inter, ("Double uniquement sur les 2 premières cartes", "err"))
-        if not store.raise_bet(g["gid"], self.uid, g["bet"]):
-            return await self.show(inter, ("Wallet insuffisant pour doubler", "err"))
+        if not store.raise_bet(g["gid"], self.uid):
+            return await self.show(inter, (f"Pas assez de {g['sym']} pour doubler", "err"))
         e.doubled = True
         g["bet_total"] = g["bet"] * 2
         if e.hit() > 21:
@@ -1262,13 +1422,17 @@ async def open_phone(ctx, screen="home", game=None, bet=None, toast=None, boot=F
         await ph.show(None, toast)
         return
     ph.build()
+    ph.rid += 1
     data = await asyncio.to_thread(ph.draw, toast)
     ph.message = await ctx.send(file=discord.File(BytesIO(data), filename="phone.webp"), view=ph)
+    if toast:
+        ph.clear_toast_later(ph.rid)
 
 
 # ========================= CONTRÔLES GLOBAUX =========================
 CHANNEL_EXEMPT = {"allow", "unallow", "allowed", "sys", "unsys", "owner", "unowner", "wl", "unwl", "prefix", "setlog", "config",
-                  "addmoney", "removemoney", "setmoney", "resetbalance", "wipeeconomy", "additem", "delitem"}
+                  "addmoney", "removemoney", "setmoney", "resetbalance", "wipeeconomy", "additem", "delitem", "edititem",
+                  "items", "commandes", "livrer", "rembourser", "setorders"}
 
 
 def allowed_channels(gid):
@@ -1312,8 +1476,8 @@ def _screen_cmd(screen):
     return _cmd
 
 
-for _scr, _names in (("wallet", ["wallet", "portefeuille", "bal", "balance", "solde"]), ("bank", ["banque", "bank"]),
-                     ("crypto", ["crypto", "cryptos", "bourse"]), ("jobs", ["metiers", "métiers", "metier", "job", "jobs"]),
+for _scr, _names in (("wallet", ["wallet", "portefeuille", "exodus"]), ("bank", ["banque", "bank", "bal", "balance", "solde"]),
+                     ("crypto", ["marche", "marché", "crypto", "cryptos", "bourse"]), ("jobs", ["metiers", "métiers", "metier", "job", "jobs"]),
                      ("profile", ["profil", "profile", "stats"]), ("top", ["top", "lb", "leaderboard", "classement"]),
                      ("shop", ["boutique", "shop"]), ("fair", ["fair", "seeds", "provablyfair"]), ("help", ["aide", "help"])):
     bot.command(name=_names[0], aliases=_names[1:])(_screen_cmd(_scr))
@@ -1337,7 +1501,9 @@ def _game_cmd(key):
     async def _cmd(ctx, bet: str = None):
         amt = None
         if bet is not None:
-            amt = parse_eur(bet, store.user(ctx.author.id)["cash"])
+            hold = store.holdings(ctx.author.id)
+            best = max([int(h["qty"] * (feed.price(s) or 0) * 100) for s, h in hold.items()] or [0])
+            amt = parse_eur(bet, best)
             if amt is None:
                 return await ctx.reply("❌ Mise invalide. Exemples : `5`, `2,50`, `tout`, `25%`.", mention_author=False, delete_after=8)
         await open_phone(ctx, game=key, bet=amt)
@@ -1353,11 +1519,18 @@ async def c_guide(ctx, *, jeu: str = None):
     key = None
     if jeu:
         j = jeu.lower().strip().replace(" ", "").replace("-", "")
+        if j in ("debutant", "débutant", "debut", "start", "tuto"):
+            return await ctx.send(embed=beginner_embed(), view=GuideView(ctx.author.id))
         for k, v in GAMES.items():
             if j in (k, v[0].lower().replace(" ", "").replace("-", "")) or j in ALIASES.get(k, []):
                 key = k
     view = GuideView(ctx.author.id)
     await ctx.send(embed=guide_embed(key) if key else guide_home_embed(), view=view)
+
+
+@bot.command(name="debutant", aliases=["débutant", "tuto", "tutoriel", "start"])
+async def c_beginner(ctx):
+    await ctx.send(embed=beginner_embed(), view=GuideView(ctx.author.id))
 
 
 @bot.command(name="verify", aliases=["verifier"])
@@ -1402,8 +1575,8 @@ async def c_addmoney(ctx, who: str = None, amount: str = None):
     m, amt = await _target_amount(ctx, who, amount)
     if m is None:
         return
-    store.add_cash(m.id, amt, "Crédit staff")
-    await ctx.send(embed=ok_embed("✅ Argent ajouté", f"{m.mention} : **+{eur(amt)}** · wallet {eur(store.user(m.id)['cash'])}"))
+    store.add_bank(m.id, amt, "Crédit staff")
+    await ctx.send(embed=ok_embed("✅ Argent ajouté", f"{m.mention} : **+{eur(amt)}** · banque {eur(store.user(m.id)['bank'])}"))
     await admin_log(ctx, "Argent ajouté", f"{m.mention} : +{eur(amt)}", 0x43b581)
 
 
@@ -1414,11 +1587,11 @@ async def c_removemoney(ctx, who: str = None, amount: str = None):
     m, amt = await _target_amount(ctx, who, amount)
     if m is None:
         return
-    cash = store.user(m.id)["cash"]
-    store.set_cash(m.id, cash - amt)
-    store.log(m.id, "wallet", "Retrait staff", -min(cash, amt))
-    await ctx.send(embed=ok_embed("✅ Argent retiré", f"{m.mention} : **-{eur(min(cash, amt))}** · wallet {eur(store.user(m.id)['cash'])}"))
-    await admin_log(ctx, "Argent retiré", f"{m.mention} : -{eur(min(cash, amt))}")
+    bal = store.user(m.id)["bank"]
+    store.set_bank(m.id, bal - amt)
+    store.log(m.id, "bank", "Retrait staff", -min(bal, amt))
+    await ctx.send(embed=ok_embed("✅ Argent retiré", f"{m.mention} : **-{eur(min(bal, amt))}** · banque {eur(store.user(m.id)['bank'])}"))
+    await admin_log(ctx, "Argent retiré", f"{m.mention} : -{eur(min(bal, amt))}")
 
 
 @bot.command(name="setmoney", aliases=["setcash"])
@@ -1428,9 +1601,9 @@ async def c_setmoney(ctx, who: str = None, amount: str = None):
     m, amt = await _target_amount(ctx, who, amount, allow_zero=True)
     if m is None:
         return
-    store.set_cash(m.id, amt)
-    await ctx.send(embed=ok_embed("✅ Wallet défini", f"{m.mention} : **{eur(amt)}**"))
-    await admin_log(ctx, "Wallet défini", f"{m.mention} : {eur(amt)}")
+    store.set_bank(m.id, amt)
+    await ctx.send(embed=ok_embed("✅ Banque définie", f"{m.mention} : **{eur(amt)}**"))
+    await admin_log(ctx, "Banque définie", f"{m.mention} : {eur(amt)}")
 
 
 @bot.command(name="resetbalance", aliases=["resetbal"])
@@ -1440,9 +1613,9 @@ async def c_reset(ctx, *, who: str = None):
     m = resolve_member(ctx.guild, who)
     if m is None:
         return await ctx.send(embed=err_embed("Utilisateur introuvable"))
-    store.db.x("UPDATE users SET cash = ?, bank = ?, savings = 0 WHERE user_id = ?", (store.setting("start_cash"), store.setting("start_bank"), str(m.id)))
+    store.db.x("UPDATE users SET cash = 0, bank = ?, savings = 0 WHERE user_id = ?", (store.setting("start_bank"), str(m.id)))
     store.db.x("DELETE FROM holdings WHERE user_id = ?", (str(m.id),))
-    await ctx.send(embed=ok_embed("✅ Comptes réinitialisés", f"{m.mention} : wallet {eur(store.setting('start_cash'))}, banque et crypto vidées."))
+    await ctx.send(embed=ok_embed("✅ Comptes réinitialisés", f"{m.mention} : banque à {eur(store.setting('start_bank'))}, épargne et crypto vidées."))
     await admin_log(ctx, "Comptes réinitialisés", m.mention)
 
 
@@ -1458,8 +1631,8 @@ class WipeConfirm(discord.ui.View):
     async def ok(self, inter, _b):
         self.stop()
         n = store.db.one("SELECT COUNT(*) AS n FROM users")["n"]
-        store.db.x("UPDATE users SET cash = ?, bank = ?, savings = 0, wagered = 0, won = 0, profit = 0, games = 0, biggest_win = 0, "
-                   "best_mult = 0, rakeback = 0, streak = 0", (store.setting("start_cash"), store.setting("start_bank")))
+        store.db.x("UPDATE users SET cash = 0, bank = ?, savings = 0, wagered = 0, won = 0, profit = 0, games = 0, biggest_win = 0, "
+                   "best_mult = 0, rakeback = 0, streak = 0", (store.setting("start_bank"),))
         for t in ("bets", "ledger", "holdings"):
             store.db.x(f"DELETE FROM {t}")
         await inter.response.edit_message(embed=ok_embed("✅ Économie remise à zéro", f"{n} compte(s)."), view=None)
@@ -1504,24 +1677,357 @@ async def c_allowed(ctx):
     await ctx.send(embed=ok_embed("📺 Salons du casino", ", ".join(f"<#{c}>" for c in ids) if ids else "Aucun salon configuré : ouvert partout."))
 
 
-@bot.command(name="additem")
-async def c_additem(ctx, price: str = None, role: discord.Role = None, *, name: str = None):
+# ========================= BOUTIQUE (staff) =========================
+KIND_HELP = {
+    "role": "Le rôle est donné **automatiquement** au joueur dès l'achat.",
+    "nitro": "Le joueur passe commande : elle arrive dans le salon des commandes, un membre du staff lui envoie le Nitro "
+             "(lien cadeau en MP) puis clique sur **Livré**.",
+    "custom": "N'importe quelle récompense (carte cadeau, objet, service…) : commande livrée à la main par le staff, comme le Nitro.",
+}
+STATUS_TXT = {"pending": "⏳ À livrer", "delivered": "✅ Livrée", "refunded": "↩️ Remboursée"}
+STATUS_COLOR = {"pending": 0xF5C451, "delivered": 0x2BD67B, "refunded": 0xFF5A66}
+
+
+def orders_channel(guild):
+    cid = store.cfg(f"orders_{guild.id}")
+    ch = guild.get_channel(int(cid)) if cid else None
+    if ch is None:
+        r = store.db.one("SELECT channel_id FROM log_channels WHERE guild_id = ?", (str(guild.id),))
+        ch = guild.get_channel(int(r["channel_id"])) if r else None
+    return ch
+
+
+def order_embed(o, member=None, status=None):
+    kind = C.ITEM_KINDS.get(o["kind"], C.ITEM_KINDS["custom"])
+    em = discord.Embed(title=f"🛒 Commande #{o['id']} · {o['name']}", color=STATUS_COLOR.get(o["status"], 0x2b2d31),
+                       timestamp=datetime.fromtimestamp(o["ts"], timezone.utc))
+    who = member.mention if member else f"<@{o['user_id']}>"
+    em.add_field(name="Joueur", value=f"{who} ({o['user_id']})", inline=True)
+    em.add_field(name="Type", value=kind[0], inline=True)
+    em.add_field(name="Prix payé", value=eur(o["price"]), inline=True)
+    em.add_field(name="Statut", value=status or STATUS_TXT.get(o["status"], o["status"]), inline=False)
+    if o["status"] == "pending":
+        em.description = "Livre la récompense au joueur, puis clique sur **Livré**. **Rembourser** lui rend son argent."
+    return em
+
+
+class OrderButton(discord.ui.DynamicItem[discord.ui.Button], template=r"order:(?P<act>done|refund):(?P<oid>\d+)"):
+    """Boutons persistants (fonctionnent même après un redémarrage du bot)."""
+
+    def __init__(self, act, oid):
+        label, style, emoji = ("Livré", GREEN, "✅") if act == "done" else ("Rembourser", RED, "↩️")
+        super().__init__(discord.ui.Button(label=label, style=style, emoji=emoji, custom_id=f"order:{act}:{oid}"))
+        self.act, self.oid = act, int(oid)
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["act"], int(match["oid"]))
+
+    async def callback(self, inter):
+        if store.rank(inter.user.id) < 2:
+            return await inter.response.send_message("Réservé au staff (Owner+).", ephemeral=True)
+        o = store.order(self.oid)
+        if not o or o["status"] != "pending":
+            await inter.response.edit_message(embed=order_embed(o) if o else None, view=None)
+            return
+        if self.act == "done":
+            store.deliver_order(self.oid, inter.user.id)
+            status, dm = f"✅ Livrée par {inter.user.mention}", f"✅ Ta commande **{o['name']}** (#{o['id']}) a été livrée. Merci !"
+        else:
+            store.refund_order(self.oid, inter.user.id)
+            status, dm = f"↩️ Remboursée par {inter.user.mention}", f"↩️ Ta commande **{o['name']}** (#{o['id']}) a été annulée : {eur(o['price'])} remboursés sur ton wallet."
+        member = inter.guild.get_member(int(o["user_id"])) if inter.guild else None
+        await inter.response.edit_message(embed=order_embed(store.order(self.oid), member, status), view=None)
+        if member:
+            try:
+                await member.send(dm)
+            except discord.HTTPException:
+                pass
+
+
+def order_view(oid):
+    v = discord.ui.View(timeout=None)
+    v.add_item(OrderButton("done", oid))
+    v.add_item(OrderButton("refund", oid))
+    return v
+
+
+async def post_order(guild, order, member):
+    ch = orders_channel(guild)
+    if ch is None:
+        log.warning(f"Commande #{order['id']} : aucun salon de commandes ni de logs configuré ({prefix()}setorders).")
+        return
+    try:
+        await ch.send(embed=order_embed(order, member), view=order_view(order["id"]),
+                      allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as e:
+        log.warning(f"Commande #{order['id']} non publiée : {e}")
+
+
+class ItemTextModal(discord.ui.Modal, title="Nom et description"):
+    def __init__(self, editor):
+        super().__init__()
+        self.ed = editor
+        d = editor.d
+        self.name = discord.ui.TextInput(label="Nom de l'article", default=d.get("name") or None, max_length=60, placeholder="ex : Nitro Boost 1 mois")
+        self.desc = discord.ui.TextInput(label="Description (optionnelle)", default=d.get("description") or None, required=False,
+                                         max_length=120, style=discord.TextStyle.paragraph, placeholder="ex : Livré en cadeau sous 24 h")
+        self.add_item(self.name)
+        self.add_item(self.desc)
+
+    async def on_submit(self, inter):
+        self.ed.d["name"] = str(self.name.value).strip()
+        self.ed.d["description"] = str(self.desc.value).strip()
+        await self.ed.refresh(inter)
+
+
+class ItemPriceModal(discord.ui.Modal, title="Prix, stock et limite"):
+    def __init__(self, editor):
+        super().__init__()
+        self.ed = editor
+        d = editor.d
+        self.price = discord.ui.TextInput(label="Prix en euros virtuels", default=f"{d['price'] / 100:g}".replace(".", ",") if d.get("price") else None,
+                                          placeholder="ex : 500 · 12,50 · 2k", max_length=15)
+        self.stock = discord.ui.TextInput(label="Stock (vide = illimité)", required=False, max_length=6,
+                                          default=str(d["stock"]) if d.get("stock", -1) >= 0 else None, placeholder="ex : 3")
+        self.limit = discord.ui.TextInput(label="Limite par joueur (vide = aucune)", required=False, max_length=4,
+                                          default=str(d["per_user"]) if d.get("per_user") else None, placeholder="ex : 1")
+        for t in (self.price, self.stock, self.limit):
+            self.add_item(t)
+
+    async def on_submit(self, inter):
+        p = parse_eur(str(self.price.value))
+        s, lim = str(self.stock.value).strip(), str(self.limit.value).strip()
+        if p is None or (s and not s.isdigit()) or (lim and not lim.isdigit()):
+            return await inter.response.send_message("❌ Prix, stock ou limite invalide (nombres entiers pour le stock et la limite).", ephemeral=True)
+        self.ed.d.update(price=p, stock=int(s) if s else -1, per_user=int(lim) if lim else 0)
+        await self.ed.refresh(inter)
+
+
+class ItemEditor(discord.ui.View):
+    """Panneau de création / modification d'un article de la boutique."""
+
+    def __init__(self, author, guild, draft):
+        super().__init__(timeout=900)
+        self.author, self.guild, self.d = author, guild, draft
+        self.warning = None
+        self.rebuild()
+
+    async def interaction_check(self, inter):
+        if inter.user.id != self.author.id:
+            await inter.response.send_message("Ce panneau n'est pas à toi.", ephemeral=True)
+            return False
+        return True
+
+    def missing(self):
+        out = []
+        if not self.d.get("name"):
+            out.append("le nom")
+        if not self.d.get("price"):
+            out.append("le prix")
+        if self.d["kind"] == "role" and not self.d.get("role_id"):
+            out.append("le rôle à donner")
+        return out
+
+    def embed(self):
+        d = self.d
+        label, color, _ic, _auto = C.ITEM_KINDS[d["kind"]]
+        title = f"✏️ Modifier l'article #{d['item_id']}" if d.get("item_id") else "🛒 Nouvel article"
+        em = discord.Embed(title=title, color=int(color.lstrip("#"), 16),
+                           description="Configure l'article avec les menus et les boutons ci-dessous, puis clique sur **Enregistrer**.")
+        em.add_field(name="Nom", value=d.get("name") or "*à définir*", inline=True)
+        em.add_field(name="Prix", value=eur(d["price"]) if d.get("price") else "*à définir*", inline=True)
+        em.add_field(name="Type", value=label, inline=True)
+        em.add_field(name="Description", value=d.get("description") or "*aucune*", inline=False)
+        if d["kind"] == "role":
+            em.add_field(name="Rôle donné", value=f"<@&{d['role_id']}>" if d.get("role_id") else "*à choisir dans le menu*", inline=True)
+        else:
+            ch = orders_channel(self.guild)
+            em.add_field(name="Salon des commandes", value=ch.mention if ch else "⚠️ *aucun : choisis-en un dans le menu*", inline=True)
+        em.add_field(name="Stock", value="Illimité" if d.get("stock", -1) < 0 else str(d["stock"]), inline=True)
+        em.add_field(name="Limite par joueur", value=str(d["per_user"]) if d.get("per_user") else "Aucune", inline=True)
+        em.add_field(name="Livraison", value=KIND_HELP[d["kind"]], inline=False)
+        if self.warning:
+            em.add_field(name="⚠️ Attention", value=self.warning, inline=False)
+        miss = self.missing()
+        em.set_footer(text=("Il manque : " + ", ".join(miss)) if miss else "Tout est prêt : clique sur Enregistrer.")
+        return em
+
+    def rebuild(self):
+        self.clear_items()
+        kind_sel = discord.ui.Select(placeholder="Type d'article…", row=0, options=[
+            discord.SelectOption(label="Rôle", value="role", emoji="👑", description="Donné automatiquement à l'achat", default=self.d["kind"] == "role"),
+            discord.SelectOption(label="Nitro / Nitro Boost", value="nitro", emoji="💎", description="Livré par le staff", default=self.d["kind"] == "nitro"),
+            discord.SelectOption(label="Autre récompense", value="custom", emoji="🎁", description="Carte cadeau, objet, service… livré par le staff",
+                                 default=self.d["kind"] == "custom")])
+
+        async def on_kind(inter):
+            self.d["kind"] = kind_sel.values[0]
+            self.warning = None
+            await self.refresh(inter)
+        kind_sel.callback = on_kind
+        self.add_item(kind_sel)
+
+        if self.d["kind"] == "role":
+            rs = discord.ui.RoleSelect(placeholder="Rôle à donner à l'achat…", row=1)
+
+            async def on_role(inter):
+                role = rs.values[0]
+                me = self.guild.me
+                if role.managed or role.is_default():
+                    self.warning = "Ce rôle ne peut pas être donné (rôle géré par Discord ou @everyone)."
+                    return await self.refresh(inter)
+                self.warning = None
+                if me and role >= me.top_role:
+                    self.warning = f"Mon rôle est plus bas que {role.mention} : place mon rôle au-dessus, sinon l'achat sera remboursé."
+                self.d["role_id"] = role.id
+                await self.refresh(inter)
+            rs.callback = on_role
+            self.add_item(rs)
+        else:
+            cs = discord.ui.ChannelSelect(placeholder="Salon où arrivent les commandes à livrer…", row=1,
+                                          channel_types=[discord.ChannelType.text])
+
+            async def on_channel(inter):
+                store.set_cfg(f"orders_{self.guild.id}", cs.values[0].id)
+                await self.refresh(inter)
+            cs.callback = on_channel
+            self.add_item(cs)
+
+        def btn(label, emoji, style, row, cb, disabled=False):
+            b = discord.ui.Button(label=label, emoji=emoji, style=style, row=row, disabled=disabled)
+            b.callback = cb
+            self.add_item(b)
+
+        async def open_text(inter):
+            await inter.response.send_modal(ItemTextModal(self))
+
+        async def open_price(inter):
+            await inter.response.send_modal(ItemPriceModal(self))
+
+        async def save(inter):
+            if self.missing():
+                return await inter.response.send_message("Il manque : " + ", ".join(self.missing()), ephemeral=True)
+            iid = store.save_item(self.d)
+            self.stop()
+            em = discord.Embed(title=f"✅ Article #{iid} enregistré", color=0x43b581,
+                               description=f"**{self.d['name']}** · {eur(self.d['price'])} · {C.ITEM_KINDS[self.d['kind']][0]}\n"
+                                           f"Il est en vente dans l'app Boutique du téléphone.")
+            await inter.response.edit_message(embed=em, view=None)
+            em2 = discord.Embed(title="📋 Boutique : article enregistré", color=0x43b581, timestamp=datetime.now(timezone.utc),
+                                description=f"#{iid} **{self.d['name']}** · {eur(self.d['price'])} · par {inter.user.mention}")
+            await send_log(self.guild, em2)
+
+        async def cancel(inter):
+            self.stop()
+            await inter.response.edit_message(embed=err_embed("Création annulée"), view=None)
+
+        btn("Nom et description", "✏️", BLUE, 2, open_text)
+        btn("Prix, stock et limite", "💶", BLUE, 2, open_price)
+        btn("Enregistrer", "✅", GREEN, 3, save, disabled=bool(self.missing()))
+        btn("Annuler", None, GREY, 3, cancel)
+
+    async def refresh(self, inter):
+        self.rebuild()
+        await inter.response.edit_message(embed=self.embed(), view=self)
+
+
+@bot.command(name="additem", aliases=["ajouterarticle"])
+async def c_additem(ctx):
     if not await gate(ctx, 2):
         return
-    pr = parse_eur(price) if price else None
-    if pr is None or not name:
-        return await ctx.send(embed=err_embed("Usage", f"`{prefix()}additem <prix en €> [@rôle] <nom>`"))
-    store.db.x("INSERT INTO shop (name, price, role_id, description) VALUES (?, ?, ?, ?)",
-               (name.strip()[:60], pr, str(role.id) if role else None, f"Donne le rôle {role.name}" if role else None))
-    await ctx.send(embed=ok_embed("✅ Article ajouté", f"**{name.strip()}** — {eur(pr)}" + (f" (donne {role.mention})" if role else "")))
+    ed = ItemEditor(ctx.author, ctx.guild, {"kind": "role", "stock": -1, "per_user": 0})
+    await ctx.send(embed=ed.embed(), view=ed)
+
+
+@bot.command(name="edititem", aliases=["modifierarticle"])
+async def c_edititem(ctx, item_id: int = None):
+    if not await gate(ctx, 2):
+        return
+    it = store.shop_item(item_id) if item_id else None
+    if not it:
+        return await ctx.send(embed=err_embed("Article introuvable", f"Usage : `{prefix()}edititem <id>` · liste avec `{prefix()}items`"))
+    d = {"item_id": it["item_id"], "name": it["name"], "description": it["description"] or "", "price": it["price"], "kind": it["kind"],
+         "role_id": int(it["role_id"]) if it["role_id"] else None, "stock": it["stock"], "per_user": it["per_user"]}
+    ed = ItemEditor(ctx.author, ctx.guild, d)
+    await ctx.send(embed=ed.embed(), view=ed)
 
 
 @bot.command(name="delitem", aliases=["removeitem"])
 async def c_delitem(ctx, item_id: int = None):
     if not await gate(ctx, 2):
         return
-    n = store.db.x("DELETE FROM shop WHERE item_id = ?", (item_id,)).rowcount
-    await ctx.send(embed=ok_embed("✅ Article supprimé") if n else err_embed("Article introuvable"))
+    n = store.db.x("UPDATE shop SET active = 0 WHERE item_id = ? AND active = 1", (item_id,)).rowcount
+    await ctx.send(embed=ok_embed("✅ Article retiré de la vente", "Les commandes déjà passées restent visibles.") if n else err_embed("Article introuvable"))
+
+
+@bot.command(name="items", aliases=["articles"])
+async def c_items(ctx):
+    if not await gate(ctx, 2):
+        return
+    items = store.shop_items()
+    em = discord.Embed(title="🛒 Articles en vente", color=0xD6336C,
+                       description=f"`{prefix()}additem` créer · `{prefix()}edititem <id>` modifier · `{prefix()}delitem <id>` retirer")
+    for i in items[:25]:
+        stock = "illimité" if i["stock"] < 0 else f"{max(0, i['stock'] - i['sold'])}/{i['stock']}"
+        em.add_field(name=f"#{i['item_id']} · {i['name']}", inline=False,
+                     value=f"{eur(i['price'])} · {C.ITEM_KINDS.get(i['kind'], C.ITEM_KINDS['custom'])[0]} · stock {stock} · {i['sold']} vendu(s)"
+                           + (f" · max {i['per_user']}/joueur" if i["per_user"] else ""))
+    if not items:
+        em.add_field(name="Aucun article", value=f"Crée le premier avec `{prefix()}additem`.")
+    await ctx.send(embed=em)
+
+
+@bot.command(name="commandes", aliases=["orders"])
+async def c_orders(ctx):
+    if not await gate(ctx, 2):
+        return
+    rows = store.pending_orders(ctx.guild.id)
+    em = discord.Embed(title=f"⏳ Commandes à livrer ({len(rows)})", color=0xF5C451,
+                       description=f"`{prefix()}livrer <n°>` ou `{prefix()}rembourser <n°>`, ou les boutons dans le salon des commandes.")
+    for o in rows:
+        em.add_field(name=f"#{o['id']} · {o['name']}", value=f"<@{o['user_id']}> · {eur(o['price'])} · <t:{o['ts']}:R>", inline=False)
+    await ctx.send(embed=em, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def _close_order(ctx, oid, act):
+    if not await gate(ctx, 2):
+        return
+    o = store.order(oid) if oid else None
+    if not o or o["status"] != "pending":
+        return await ctx.send(embed=err_embed("Commande introuvable ou déjà traitée"))
+    if act == "done":
+        store.deliver_order(oid, ctx.author.id)
+    else:
+        store.refund_order(oid, ctx.author.id)
+    o = store.order(oid)
+    await ctx.send(embed=order_embed(o, None, f"{STATUS_TXT[o['status']]} par {ctx.author.mention}"), allowed_mentions=discord.AllowedMentions.none())
+    m = ctx.guild.get_member(int(o["user_id"]))
+    if m:
+        try:
+            await m.send(f"Ta commande **{o['name']}** (#{o['id']}) : {STATUS_TXT[o['status']].lower()}.")
+        except discord.HTTPException:
+            pass
+
+
+@bot.command(name="livrer", aliases=["deliver"])
+async def c_deliver(ctx, oid: int = None):
+    await _close_order(ctx, oid, "done")
+
+
+@bot.command(name="rembourser", aliases=["refund"])
+async def c_refund(ctx, oid: int = None):
+    await _close_order(ctx, oid, "refund")
+
+
+@bot.command(name="setorders")
+async def c_setorders(ctx, channel: discord.TextChannel = None):
+    if not await gate(ctx, 3):
+        return
+    if not channel:
+        return await ctx.send(embed=err_embed("Mentionne un salon", f"`{prefix()}setorders #commandes`"))
+    store.set_cfg(f"orders_{ctx.guild.id}", channel.id)
+    await ctx.send(embed=ok_embed("✅ Salon des commandes", f"Les commandes Nitro et récompenses arrivent dans {channel.mention}."))
 
 
 @bot.command(name="config", aliases=["settings"])
@@ -1610,6 +2116,13 @@ async def c_unwl(ctx, *, who: str = None):
 
 # ========================= EVENTS =========================
 _ready = {"done": False}
+
+
+async def _setup_hook():
+    bot.add_dynamic_items(OrderButton)  # boutons Livré / Rembourser actifs après redémarrage
+
+
+bot.setup_hook = _setup_hook
 
 
 @bot.event

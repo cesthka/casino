@@ -8,7 +8,7 @@ from gfx import (W, H, BG, SURF, SURF2, LINE, TXT, MUT, DIM, GOLD, GREEN, GREEN_
 
 APPS = [  # clé, nom, couleur, icône
     ("casino", "Casino", "#7C4DFF", "dice"), ("wallet", "Wallet", "#E0A526", "wallet"),
-    ("bank", "Banque", "#2F6BFF", "bank"), ("crypto", "Crypto", "#17A660", "chart"),
+    ("bank", "Banque", "#2F6BFF", "bank"), ("crypto", "Marché", "#17A660", "chart"),
     ("jobs", "Métiers", "#D9573B", "job"), ("top", "Top", "#C08A1E", "trophy"),
     ("shop", "Boutique", "#D6336C", "bag"), ("daily", "Daily", "#B8860B", "gift"),
     ("fair", "Fair", "#0E8A8A", "shield"), ("guide", "Guide", "#5A6578", "book"),
@@ -49,7 +49,7 @@ def lock(brand, notifs, t=None):
 
 # =============== ACCUEIL ===============
 def home(d, t=None):
-    """d: brand, cash, bank, savings, crypto, total, vip, vip_color, daily_ready, streak, daily_in, coin(sym, change, spark)"""
+    """d: brand, bank, savings, crypto, total, vip, vip_color, daily_ready, streak, daily_in, coin(sym, change, spark)"""
     cv = phone("home")
     # widget solde
     x, y, w = 18, 62, W - 36
@@ -59,7 +59,7 @@ def home(d, t=None):
     pill(cv, x + w - 16, y + 13, f"VIP {d['vip']}", d["vip_color"], BG, 11, "b", anchor="r")
     cv.text(x + 18, y + 34, eur(d["total"]), 36, "b", TXT, maxw=w - 36)
     cx = x + 18
-    for label, v, c in (("Wallet", d["cash"], TXT), ("Banque", d["bank"] + d["savings"], TXT), ("Crypto", d["crypto"], GREEN)):
+    for label, v, c in (("Banque", d["bank"], TXT), ("Épargne", d["savings"], TXT), ("Wallet crypto", d["crypto"], GREEN)):
         cv.text(cx, y + 96, label, 12, "m", MUT)
         cv.text(cx, y + 110, eur_short(v), 13, "b", c)
         cx += (w - 36) / 3
@@ -108,17 +108,27 @@ def home(d, t=None):
 
 
 # =============== CASINO (lobby) ===============
-def lobby(brand, cash, games, cat="all", t=None):
-    """games: liste (key, nom, tag, couleur, catégorie)"""
+def coin_badge(cv, cx, cy, r, sym, color):
+    cv.circ(cx, cy, r, color)
+    cv.text(cx, cy, sym[:4], r * (0.5 if len(sym) > 3 else 0.62), "b", "#FFFFFF", anchor="c", valign="mid")
+
+
+def lobby(brand, play, games, cat="all", t=None):
+    """games: liste (key, nom, tag, couleur, catégorie) · play: dict sym, color, value (centimes) ou None"""
     cv = phone()
     cv.rr(18, 56, 36, 36, 11, "#7C4DFF")
     cv.icon("dice", 25, 63, 22, "#FFFFFF", 2)
-    cv.text(64, 54, f"{brand.upper()} CASINO", 18, "x", TXT, maxw=180)
-    cv.text(64, 79, f"{len(games)} jeux · provably fair", 11, "m", DIM)
-    s = eur(cash)
-    tw = text_w(s, 13, "b")
-    cv.rr(W - 18 - tw - 22, 58, tw + 22, 32, 11, SURF)
-    cv.text(W - 29, 74, s, 13, "b", TXT, anchor="r", valign="mid")
+    cv.text(64, 54, f"{brand.upper()} CASINO", 18, "x", TXT, maxw=170)
+    cv.text(64, 79, f"{len(games)} jeux · se joue en crypto", 11, "m", DIM)
+    if play:
+        s = eur(play["value"])
+        tw = text_w(s, 13, "b")
+        bw = tw + 52
+        cv.rr(W - 18 - bw, 58, bw, 32, 11, SURF)
+        coin_badge(cv, W - 18 - bw + 18, 74, 11, play["sym"], play["color"])
+        cv.text(W - 29, 74, s, 13, "b", TXT, anchor="r", valign="mid")
+    else:
+        pill(cv, W - 18, 60, "Aucune crypto", "#3A1418", RED_SOFT, 12, "b", h=28, anchor="r")
     x = 18
     for k, label in (("all", "Tous"), ("originals", "Originals"), ("casino", "Casino")):
         on = k == cat
@@ -141,34 +151,85 @@ def lobby(brand, cash, games, cat="all", t=None):
 
 
 # =============== WALLET ===============
-def wallet(brand, cash, txs, t=None):
+def wallet(brand, total, pnl, assets, play_sym, fees, t=None):
+    """Wallet crypto façon appli mobile. assets: dicts sym, name, color, qty, value, change"""
     cv = phone()
-    cv.text(20, 52, "Wallet", 30, "x")
-    x, y, w, h = 18, 104, W - 36, 200
-    cv.shadow(x, y, w, h, 24, 18, 150, 12)
-    cv.rr(x, y, w, h, 24, "#1A1530")
     cv.c.save()
     import skia
-    cv.c.clipRRect(skia.RRect.MakeRectXY(skia.Rect.MakeXYWH(x, y, w, h), 24, 24), skia.ClipOp.kIntersect, True)
-    cv.circ(x + w + 10, y - 10, 150, "#7C4DFF", 150, blur=28)
-    cv.circ(x - 20, y + h + 30, 140, "#E0A526", 100, blur=28)
+    cv.c.clipRRect(skia.RRect.MakeRectXY(skia.Rect.MakeXYWH(0, 0, W, 330), 0, 0), skia.ClipOp.kIntersect, True)
+    cv.circ(W / 2, 40, 260, "#5B3BD6", 120, blur=60)
+    cv.circ(40, 300, 160, "#16A3A3", 70, blur=60)
     cv.c.restore()
-    cv.text(x + 20, y + 20, brand.upper(), 17, "x", TXT)
-    cv.rr(x + w - 60, y + 18, 40, 30, 6, "#D8B25A")
-    cv.line(x + w - 60, y + 33, x + w - 20, y + 33, "#A88A3A", 1)
-    cv.text(x + 20, y + 92, "Espèces disponibles", 12, "m", "#D5CCF5")
-    cv.text(x + 20, y + 108, eur(cash), 34, "b", TXT, maxw=w - 40)
-    cv.text(x + 20, y + h - 34, "•••• " + str(abs(hash(brand)) % 9000 + 1000), 14, "s", "#D5CCF5")
-    cv.text(x + w - 20, y + h - 34, brand.upper(), 14, "s", "#D5CCF5", anchor="r", maxw=150)
-    acts = (("send", "Envoyer"), ("bank", "Banque"), ("chart", "Crypto"), ("bag", "Boutique"))
+    cv.text(20, 52, "Wallet", 30, "x")
+    pill(cv, W - 18, 60, f"{brand.upper()} · CRYPTO", "#FFFFFF", "#FFFFFF", 10.5, "b", h=24, anchor="r", a=26)
+    cv.text(W / 2, 112, "Valeur du portefeuille", 13, "m", "#CFC8F5", anchor="c")
+    cv.text(W / 2, 132, eur(total), 44, "b", TXT, anchor="c", maxw=W - 40)
+    pc = GREEN if pnl >= 0 else RED_SOFT
+    if assets:
+        pill(cv, W / 2, 194, f"{eur(pnl, sign=True)} depuis l'achat", mix(pc, BG, 0.78), pc, 12, "b", h=26, anchor="c")
+    acts = (("down", "Acheter"), ("up", "Vers banque"), ("dice", "Casino"), ("chart", "Marché"))
     aw = (W - 36) / 4
     for i, (ic, label) in enumerate(acts):
         cx = 18 + aw * i + aw / 2
-        cv.circ(cx, 350, 27, SURF2)
-        cv.icon(ic, cx - 11, 339, 22, TXT, 2)
-        cv.text(cx, 384, label, 12, "m", "#C9CFDA", anchor="c")
-    cv.text(20, 418, "Transactions", 17, "b")
-    _tx_list(cv, 450, txs, 6)
+        cv.circ(cx, 262, 27, "#FFFFFF", 30)
+        cv.icon(ic, cx - 11, 251, 22, TXT, 2.2)
+        cv.text(cx, 296, label, 12, "m", "#D5D9E2", anchor="c")
+    cv.text(20, 334, "Mes cryptos", 17, "b")
+    cv.text(W - 22, 338, f"Frais : achat {fees[0]} · banque {fees[1]}", 11, "m", DIM, anchor="r")
+    if not assets:
+        y = 368
+        cv.rr(18, y, W - 36, 190, 22, SURF)
+        cv.icon("wallet", W / 2 - 18, y + 22, 36, GOLD, 2)
+        cv.text(W / 2, y + 72, "Ton Wallet est vide", 17, "b", TXT, anchor="c")
+        cv.text(W / 2, y + 100, "Achète ta première crypto avec l'argent", 13, "r", MUT, anchor="c")
+        cv.text(W / 2, y + 120, "de ta banque pour jouer au casino.", 13, "r", MUT, anchor="c")
+        pill(cv, W / 2, y + 146, "Menu « Acheter une crypto » en dessous", "#1F2A44", "#9DB8FF", 11.5, "b", h=28, anchor="c")
+    else:
+        rows = assets[:7]
+        cv.rr(18, 366, W - 36, 62 * len(rows), 20, SURF)
+        for i, a in enumerate(rows):
+            ry = 366 + i * 62
+            if i:
+                cv.line(70, ry, W - 18, ry, "#202734", 1)
+            coin_badge(cv, 44, ry + 31, 18, a["sym"], a["color"])
+            cv.text(72, ry + 12, a["name"], 14.5, "s", TXT, maxw=140)
+            q = f"{a['qty']:.8f}".rstrip("0").rstrip(".") if a["qty"] < 1000 else f"{a['qty']:,.0f}".replace(",", " ")
+            cv.text(72, ry + 33, f"{q} {a['sym']}", 11.5, "r", MUT, maxw=150)
+            if a["sym"] == play_sym:
+                pill(cv, 72 + min(150, text_w(f"{q} {a['sym']}", 11.5, "r")) + 8, ry + 32, "CASINO", "#1F2A44", "#9DB8FF", 9, "b", h=16, px=6)
+            cv.text(W - 32, ry + 12, eur(a["value"]), 14.5, "b", TXT, anchor="r")
+            up = a["change"] >= 0
+            cv.text(W - 32, ry + 33, f"{'+' if up else ''}{a['change']:.2f} %".replace(".", ","), 12, "s", GREEN if up else RED_SOFT, anchor="r")
+    _toast(cv, t)
+    return finish(cv)
+
+
+def need_crypto(brand, bank_balance, t=None):
+    """Écran pédagogique : il faut de la crypto pour jouer."""
+    cv = phone()
+    app_header(cv, "CASINO", None, "Casino")
+    cv.glow(W / 2, 170, 120, "#7C4DFF", 90)
+    cv.circ(W / 2, 170, 46, "#2A1F5C")
+    cv.icon("wallet", W / 2 - 22, 148, 44, GOLD, 2.2)
+    cv.text(W / 2, 232, "Il te faut de la crypto", 22, "b", TXT, anchor="c")
+    cv.text(W / 2, 264, "Le casino se joue uniquement en crypto.", 13.5, "r", MUT, anchor="c")
+    cv.text(W / 2, 284, "Voici comment faire en 3 étapes :", 13.5, "r", MUT, anchor="c")
+    steps = [("bank", "#2F6BFF", "Ta banque", f"Tu as {eur(bank_balance)} gagnés avec le daily et ton métier."),
+             ("down", "#E0A526", "Achète de la crypto", "Appuie sur « Acheter de la crypto » en dessous."),
+             ("dice", "#7C4DFF", "Joue au casino", "Choisis ta crypto dans le Casino, puis ton jeu.")]
+    y = 318
+    for i, (ic, color, title, sub) in enumerate(steps):
+        cv.rr(18, y, W - 36, 78, 20, SURF)
+        cv.circ(50, y + 39, 20, mix(color, BG, 0.6))
+        cv.icon(ic, 39, y + 28, 22, color, 2.2)
+        cv.circ(66, y + 22, 9, color)
+        cv.text(66, y + 22, str(i + 1), 10, "b", "#FFFFFF", anchor="c", valign="mid")
+        cv.text(84, y + 18, title, 15, "b", TXT, maxw=W - 120)
+        cv.text(84, y + 42, sub, 12, "r", MUT, maxw=W - 120)
+        y += 88
+    cv.rr(18, y + 4, W - 36, 64, 18, "#1F2A44")
+    cv.text(34, y + 18, "Conseil pour débuter : l'USDT", 13, "b", "#9DB8FF")
+    cv.text(34, y + 40, "Sa valeur reste stable, ton argent ne bouge pas.", 12, "r", "#C9D6F5", maxw=W - 70)
     _toast(cv, t)
     return finish(cv)
 
@@ -202,7 +263,7 @@ def bank(brand, balance, savings, rate_txt, ops, t=None):
     cv.rr(18.5, 108.5, W - 37, 115, 24, "#24407F", stroke=1)
     cv.text(38, 126, "Compte courant", 13, "m", "#A9C2F5")
     cv.text(38, 144, eur(balance), 36, "b", TXT, maxw=W - 80)
-    cv.text(38, 194, f"FR76 {brand.upper()[:4]:<4} •••• {abs(hash(brand + 'b')) % 9000 + 1000} · à l'abri des jeux", 11.5, "r", "#A9C2F5", maxw=W - 80)
+    cv.text(38, 194, f"FR76 {brand.upper()[:4]:<4} •••• {sum(map(ord, brand)) * 37 % 9000 + 1000} · salaires, daily, boutique", 11.5, "r", "#A9C2F5", maxw=W - 80)
     cv.rr(18, 234, W - 36, 80, 22, SURF)
     cv.icon("piggy", 34, 260, 28, GOLD, 2)
     cv.text(74, 250, "Livret épargne", 13, "m", MUT)
@@ -210,7 +271,7 @@ def bank(brand, balance, savings, rate_txt, ops, t=None):
     cv.text(W - 36, 254, rate_txt[0], 14, "b", GREEN, anchor="r")
     cv.text(W - 36, 276, rate_txt[1], 11.5, "r", MUT, anchor="r")
     aw = (W - 36 - 16) / 3
-    for i, (ic, label) in enumerate((("down", "Déposer"), ("up", "Retirer"), ("swap", "Virement"))):
+    for i, (ic, label) in enumerate((("wallet", "Acheter crypto"), ("swap", "Virement"), ("piggy", "Épargner"))):
         ax = 18 + i * (aw + 8)
         cv.rr(ax, 326, aw, 76, 18, SURF)
         cv.icon(ic, ax + aw / 2 - 11, 340, 22, "#7FB0FF", 2.2)
@@ -225,7 +286,7 @@ def bank(brand, balance, savings, rate_txt, ops, t=None):
 def crypto(brand, portfolio, pnl, coins, live, page=0, t=None):
     """coins: dicts sym, name, color, price, change, spark, qty"""
     cv = phone()
-    cv.text(20, 50, "Crypto", 30, "x")
+    cv.text(20, 50, "Marché", 30, "x")
     c = GREEN if live else GOLD
     cv.circ(W - 64, 72, 4, c)
     cv.text(W - 56, 72, "LIVE" if live else "HORS LIGNE", 11.5, "b", c, valign="mid")
@@ -276,9 +337,9 @@ def _price(cents_f):
     return s + " €"
 
 
-def crypto_coin(co, qty, value_cents, cash, avg_cents=None, t=None):
+def crypto_coin(co, qty, value_cents, bank_balance, avg_cents=None, fees=("1 %", "1,5 %"), t=None):
     cv = phone()
-    app_header(cv, co["sym"], cash, "Crypto")
+    app_header(cv, co["sym"], f"Banque {eur(bank_balance)}", "Wallet")
     cv.circ(W / 2, 140, 34, co["color"])
     cv.text(W / 2, 140, co["sym"][:4], 15, "b", "#FFFFFF", anchor="c", valign="mid")
     cv.text(W / 2, 184, co["name"], 15, "s", MUT, anchor="c")
@@ -290,10 +351,12 @@ def crypto_coin(co, qty, value_cents, cash, avg_cents=None, t=None):
     sparkline(cv, 34, 324, W - 68, 170, co["spark"], lc, 2.5)
     stat_boxes(cv, 530, [("Détenu", f"{qty:.6g}" if qty else "0"), ("Valeur", eur(value_cents), GOLD),
                          ("Prix moyen", eur(avg_cents) if avg_cents else "—")])
-    cv.rr(18, 604, W - 36, 64, 18, SURF)
-    cv.text(34, 618, "Frais de transaction", 12, "m", MUT)
-    cv.text(34, 636, "0,10 % à l'achat et à la vente", 13, "s", TXT)
-    footer_note(cv, "Cours en direct · monnaie virtuelle du bot", 690)
+    cv.rr(18, 604, W - 36, 84, 18, SURF)
+    cv.icon("down", 34, 620, 18, GREEN, 2.4)
+    cv.text(60, 620, f"Acheter : de la banque vers le wallet · frais {fees[0]}", 13, "s", TXT, maxw=W - 90)
+    cv.icon("up", 34, 652, 18, GOLD, 2.4)
+    cv.text(60, 652, f"Vendre : du wallet vers la banque · frais {fees[1]}", 13, "s", TXT, maxw=W - 90)
+    footer_note(cv, "Cours en direct · monnaie virtuelle du bot", 706)
     _toast(cv, t)
     return finish(cv)
 
@@ -425,26 +488,41 @@ def leaderboard(kind_label, rows, me=None, t=None):
 
 
 # =============== BOUTIQUE ===============
+SHOP_KINDS = {"role": ("RÔLE", "#4C8DFF", "crown"), "nitro": ("NITRO", "#F47FFF", "gem"), "custom": ("RÉCOMPENSE", "#F5A524", "gift")}
+
+
 def shop(cash, items, t=None):
-    """items: (id, nom, prix_cents, description, possédé)"""
+    """cash = solde de la banque · items: dicts id, name, price, desc, owned, kind, left (None = illimité), bought, limit"""
     cv = phone()
     app_header(cv, "BOUTIQUE", cash)
     if not items:
-        cv.rr(18, 110, W - 36, 120, 22, SURF)
-        cv.icon("bag", W / 2 - 16, 130, 32, DIM, 2)
-        cv.text(W / 2, 176, "La boutique est vide", 15, "s", TXT, anchor="c")
-        cv.text(W / 2, 198, "Le staff peut ajouter des articles", 12, "r", MUT, anchor="c")
-    for i, (iid, name, price, desc, owned) in enumerate(items[:8]):
-        y = 104 + i * 76
-        cv.rr(18, y, W - 36, 68, 18, SURF)
-        cv.rr(30, y + 12, 44, 44, 12, "#D6336C")
-        cv.text(52, y + 34, f"#{iid}", 12, "b", "#FFFFFF", anchor="c", valign="mid")
-        cv.text(86, y + 13, name, 15, "s", TXT, maxw=170)
-        cv.text(86, y + 35, desc or "Article", 11.5, "r", MUT, maxw=170)
-        if owned:
-            pill(cv, W - 30, y + 22, "Possédé", GREEN_BG, GREEN, 12, "b", anchor="r")
+        cv.rr(18, 110, W - 36, 140, 22, SURF)
+        cv.icon("bag", W / 2 - 16, 132, 32, DIM, 2)
+        cv.text(W / 2, 180, "La boutique est vide", 15, "s", TXT, anchor="c")
+        cv.text(W / 2, 204, "Le staff peut ajouter des articles", 12, "r", MUT, anchor="c")
+    else:
+        cv.text(22, 100, f"{len(items)} ARTICLE{'S' if len(items) > 1 else ''} · PAIEMENT DEPUIS LA BANQUE", 10.5, "s", DIM)
+    for i, it in enumerate(items[:8]):
+        y = 122 + i * 82
+        label, color, ic = SHOP_KINDS.get(it["kind"], SHOP_KINDS["custom"])
+        soldout = it["left"] is not None and it["left"] <= 0
+        maxed = it["limit"] and it["bought"] >= it["limit"]
+        a = 140 if (soldout or maxed) and not it["owned"] else 255
+        cv.rr(18, y, W - 36, 74, 20, SURF)
+        cv.rr(30, y + 13, 48, 48, 14, mix(color, BG, 0.72))
+        cv.icon(ic, 42, y + 25, 24, color, 2.2)
+        cv.text(90, y + 12, it["name"], 15, "s", TXT, maxw=W - 230, a=a)
+        tw = pill(cv, 90, y + 35, label, mix(color, BG, 0.8), color, 9.5, "b", h=18, px=7)
+        sub = it["desc"] or ""
+        if it["left"] is not None:
+            sub = ("Épuisé" if soldout else f"{it['left']} restant{'s' if it['left'] > 1 else ''}") + (f" · {sub}" if sub else "")
+        cv.text(90 + tw + 6, y + 37, sub or f"Article #{it['id']}", 11, "r", RED_SOFT if soldout else MUT, maxw=W - 250 - tw)
+        if it["owned"]:
+            pill(cv, W - 30, y + 25, "Possédé", GREEN_BG, GREEN, 12, "b", anchor="r")
+        elif maxed:
+            pill(cv, W - 30, y + 25, "Limite", SURF2, MUT, 12, "b", anchor="r")
         else:
-            cv.text(W - 32, y + 34, eur(price), 15, "b", GOLD if cash >= price else RED_SOFT, anchor="r", valign="mid")
+            cv.text(W - 32, y + 37, eur(it["price"]), 15, "b", GOLD if cash >= it["price"] else RED_SOFT, anchor="r", valign="mid", a=a)
     _toast(cv, t)
     return finish(cv)
 

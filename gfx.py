@@ -472,7 +472,7 @@ def app_header(cv, title, balance=None, back="Accueil", accent=None):
     cv.text(36, y, back, 15, "s", BLUE, valign="mid")
     cv.text(W / 2, y, title, 17, "x", accent or TXT, anchor="c", valign="mid", maxw=170)
     if balance is not None:
-        s = eur(balance)
+        s = balance if isinstance(balance, str) else eur(balance)
         tw = text_w(s, 13, "b")
         cv.rr(W - 18 - tw - 20, y - 15, tw + 20, 30, 10, SURF)
         cv.text(W - 28, y, s, 13, "b", TXT, anchor="r", valign="mid")
